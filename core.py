@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "今天摸了吗"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
 WIDGET_TEXT_FILE = "widget.txt"
@@ -36,14 +36,15 @@ WIDGET_JSON_FILE = "widget.json"
 DAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 # 刷新间隔：数值 + 单位。ms 为换算后的毫秒数（保留字段，兼容旧配置与旧代码）。
-# 每种单位给出允许的填写范围，最终毫秒数再统一夹到 [50, 3_600_000]。
+# 每种单位给出允许的填写范围，最终毫秒数再统一夹到 [10, 3_600_000]。
+# v1.5.0 解锁更快刷新：下限从 50ms 放宽到 10ms（Qt 定时器在该量级仍然稳定）。
 REFRESH_UNITS: dict[str, tuple[str, float, float, float]] = {
-    "ms": ("毫秒", 1.0, 50.0, 3_600_000.0),
-    "s": ("秒", 1000.0, 0.05, 3600.0),
+    "ms": ("毫秒", 1.0, 10.0, 3_600_000.0),
+    "s": ("秒", 1000.0, 0.01, 3600.0),
     "min": ("分钟", 60_000.0, 0.001, 60.0),
     "h": ("小时", 3_600_000.0, 0.001, 1.0),
 }
-REFRESH_MIN_MS = 50
+REFRESH_MIN_MS = 10
 REFRESH_MAX_MS = 3_600_000
 
 # 调休日历同步调度：同一个刷新间隔同时驱动主界面刷新与日历同步检查。
@@ -98,7 +99,17 @@ def effective_hues(cfg: "Settings", widget: bool = False) -> tuple[int, int, int
     """返回当前生效的 (主色相, 副色相, 背景色相)；-1 表示跟随所选主题。
 
     小组件默认与主界面一致；用户单独指定时各用各的，互不影响。
+    「自动匹配桌面壁纸」优先级最高：取壁纸主色相推导一组邻近色，
+    取不到（纯灰壁纸 / 无权限 / 非图形壁纸）时自动回退到原来的设置。
     """
+    if widget and getattr(cfg, "widget_auto_wallpaper", False):
+        try:
+            import wallpaper_color
+            auto = wallpaper_color.auto_hues()
+        except Exception:
+            auto = None
+        if auto:
+            return (int(auto[0]) % 360, int(auto[1]) % 360, int(auto[2]) % 360)
     if widget and not getattr(cfg, "widget_follow_main", True):
         return (int(getattr(cfg, "widget_accent_hue", -1)),
                 int(getattr(cfg, "widget_accent2_hue", -1)),
@@ -248,6 +259,7 @@ class Settings:
     widget_scale: float = 1.0
     # 小组件配色：默认与主界面一致，也可单独指定
     widget_follow_main: bool = True
+    widget_auto_wallpaper: bool = False   # 自动匹配桌面壁纸主色（优先于上面三项）
     widget_accent_hue: int = -1
     widget_accent2_hue: int = -1
     widget_bg_hue: int = -1
@@ -376,7 +388,8 @@ class Settings:
             and all(isinstance(x, str) and len(x) == 10 for x in p)
         ] if isinstance(pairs, list) else []
 
-        s.decimals = int(cls._num(out["decimals"], 4, 0, 6))
+        # 金额小数位：v1.5.0 起支持到 8 位（满足「看每秒进账」的极端精度需求）
+        s.decimals = int(cls._num(out["decimals"], 4, 0, 8))
         s.theme = out["theme"] if out["theme"] in ("aurora", "peach", "mint") else "aurora"
         s.accent_hue = cls._hue(out["accent_hue"])
         s.accent2_hue = cls._hue(out["accent2_hue"])
@@ -419,6 +432,7 @@ class Settings:
         # 无级缩放：不再只有档位，保留两位小数，范围 0.5x ~ 3.0x
         s.widget_scale = round(cls._num(out["widget_scale"], 1.0, WIDGET_SCALE_MIN, WIDGET_SCALE_MAX), 3)
         s.widget_follow_main = bool(out["widget_follow_main"])
+        s.widget_auto_wallpaper = bool(out["widget_auto_wallpaper"])
         s.widget_accent_hue = cls._hue(out["widget_accent_hue"])
         s.widget_accent2_hue = cls._hue(out["widget_accent2_hue"])
         s.widget_bg_hue = cls._hue(out["widget_bg_hue"])

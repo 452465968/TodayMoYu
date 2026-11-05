@@ -46,7 +46,7 @@ def test_refresh_units(value, unit, expect_ms):
 def test_refresh_rejects_invalid_values(value, unit):
     ok, msg, ms = validate_refresh_interval(value, unit)
     assert not ok and msg
-    assert 50 <= ms <= 3_600_000
+    assert 10 <= ms <= 3_600_000
 
 
 def test_old_config_only_has_refresh_ms():

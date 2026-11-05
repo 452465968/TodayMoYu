@@ -424,9 +424,17 @@ class DesktopWidget(QWidget):
         a.triggered.connect(lambda: self.set_opacity(0.94))
 
         appearance.addSeparator()
+        a = appearance.addAction("配色自动匹配壁纸")
+        a.setCheckable(True)
+        a.setChecked(bool(self.cfg.widget_auto_wallpaper))
+        a.triggered.connect(self._toggle_auto_wallpaper)
+        a = appearance.addAction("重新匹配壁纸颜色")
+        a.setEnabled(bool(self.cfg.widget_auto_wallpaper))
+        a.triggered.connect(self._rematch_wallpaper)
         a = appearance.addAction("配色与主界面一致")
         a.setCheckable(True)
-        a.setChecked(bool(self.cfg.widget_follow_main))
+        a.setChecked(bool(self.cfg.widget_follow_main) and not self.cfg.widget_auto_wallpaper)
+        a.setEnabled(not self.cfg.widget_auto_wallpaper)
         a.triggered.connect(self._toggle_follow_main)
         a = appearance.addAction("单独设置小组件配色…")
         a.triggered.connect(self.app.open_settings_color)
@@ -447,6 +455,22 @@ class DesktopWidget(QWidget):
         self.cfg.widget_follow_main = bool(checked)
         self.apply_appearance()
         self.app.save_config()
+
+    def _toggle_auto_wallpaper(self, checked: bool) -> None:
+        """开启后取壁纸主色；换壁纸时右键「重新匹配壁纸颜色」强制刷新缓存。"""
+        self.cfg.widget_auto_wallpaper = bool(checked)
+        if checked:
+            import wallpaper_color
+            wallpaper_color.reset_cache()
+        self.apply_appearance()
+        self.app.save_config()
+
+    def _rematch_wallpaper(self) -> None:
+        import wallpaper_color
+        wallpaper_color.reset_cache()
+        wallpaper_color.auto_hues(force=True)
+        self.apply_appearance()
+        self.update()
 
     def _on_dock_toggled(self, checked: bool) -> None:
         ok = self.set_docked(checked)

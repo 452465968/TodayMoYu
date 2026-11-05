@@ -199,7 +199,7 @@ def test_settings_tolerant_to_bad_values():
     })
     assert s.salary_mode == "daily"
     assert s.monthly_salary == 3000.0
-    assert 0 <= s.decimals <= 6
+    assert 0 <= s.decimals <= 8
     assert s.work_start == "09:00"
     assert s.workdays == [2]
     assert s.holidays == []

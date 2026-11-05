@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QSlider, QSpinBox, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
 
+import wallpaper_color
 import win32_extra as win
 from core import (
     APP_NAME, APP_VERSION, DAY_NAMES, REFRESH_UNITS, WIDGET_SCALE_MAX, WIDGET_SCALE_MIN,
@@ -211,7 +212,8 @@ class SettingsDialog(QDialog):
 
         self._orig_widget = (c.widget_scale, c.widget_opacity)
         self._orig_colors = (c.accent_hue, c.accent2_hue, c.bg_hue,
-                             c.widget_follow_main, c.widget_accent_hue,
+                             c.widget_follow_main, c.widget_auto_wallpaper,
+                             c.widget_accent_hue,
                              c.widget_accent2_hue, c.widget_bg_hue)
         self._connect_preview()
         self._update_preview()
@@ -237,7 +239,8 @@ class SettingsDialog(QDialog):
     def _set_refresh_range(self, unit: str) -> None:
         """按单位切换输入框的合法范围与步进，越界值自动夹回。"""
         label, factor, lo, hi = REFRESH_UNITS.get(unit, REFRESH_UNITS["ms"])
-        step = {"ms": 50.0, "s": 0.1, "min": 0.1, "h": 0.01}.get(unit, 1.0)
+        # v1.5.0：毫秒档步进 10ms，最低 10ms（原先 50ms 起）
+        step = {"ms": 10.0, "s": 0.1, "min": 0.1, "h": 0.01}.get(unit, 1.0)
         decimals = {"ms": 0, "s": 2, "min": 3, "h": 3}.get(unit, 0)
         self.ed_refresh.blockSignals(True)
         self.ed_refresh.setDecimals(decimals)
@@ -277,7 +280,8 @@ class SettingsDialog(QDialog):
         self.app.cfg.widget_scale = s
         self.app.cfg.widget_opacity = o
         (self.app.cfg.accent_hue, self.app.cfg.accent2_hue, self.app.cfg.bg_hue,
-         self.app.cfg.widget_follow_main, self.app.cfg.widget_accent_hue,
+         self.app.cfg.widget_follow_main, self.app.cfg.widget_auto_wallpaper,
+         self.app.cfg.widget_accent_hue,
          self.app.cfg.widget_accent2_hue, self.app.cfg.widget_bg_hue) = self._orig_colors
         self._apply_widget_appearance(s, o)
         if self.app.window:
@@ -297,6 +301,7 @@ class SettingsDialog(QDialog):
                           (self.hue_bg, "bg_hue")):
             setattr(c, attr, row.hue())
         c.widget_follow_main = self.cb_widget_follow.isChecked()
+        c.widget_auto_wallpaper = self.cb_widget_auto.isChecked()
         c.widget_accent_hue = self.hue_w_accent.hue()
         c.widget_accent2_hue = self.hue_w_accent2.hue()
         c.widget_bg_hue = self.hue_w_bg.hue()
@@ -305,7 +310,8 @@ class SettingsDialog(QDialog):
         # 控件是逐个构造的：任何一个还没建好就先跳过，避免构造期回调炸掉
         if not all(hasattr(self, n) for n in
                    ("hue_accent", "hue_accent2", "hue_bg", "hue_w_accent",
-                    "hue_w_accent2", "hue_w_bg", "cb_widget_follow")):
+                    "hue_w_accent2", "hue_w_bg", "cb_widget_follow",
+                    "cb_widget_auto")):
             return
         self._collect_colors()
         if self.app.window:
@@ -322,20 +328,52 @@ class SettingsDialog(QDialog):
         for row in (self.hue_accent, self.hue_accent2, self.hue_bg,
                     self.hue_w_accent, self.hue_w_accent2, self.hue_w_bg):
             row.set_hue(-1)
+        self.cb_widget_auto.setChecked(False)
         self.cb_widget_follow.setChecked(True)
         self.preview.setText("已恢复主题默认配色，保存后生效。")
+
+    def _update_wallpaper_label(self) -> None:
+        if not hasattr(self, "lb_wallpaper"):
+            return
+        if not self.cb_widget_auto.isChecked():
+            self.lb_wallpaper.setText("勾选后自动取桌面壁纸主色；换壁纸点「重新匹配」。")
+            return
+        self.lb_wallpaper.setText(wallpaper_color.describe())
+
+    def _on_widget_auto_toggled(self, checked: bool) -> None:
+        """壁纸自动配色开启后，跟随主界面与手动色相都让位（优先级低于自动）。"""
+        if hasattr(self, "cb_widget_follow"):
+            self.cb_widget_follow.setEnabled(not checked)
+        self._on_widget_follow_toggled(self.cb_widget_follow.isChecked()
+                                       if hasattr(self, "cb_widget_follow") else False)
+        self._update_wallpaper_label()
+
+    def _rematch_wallpaper(self) -> None:
+        """换壁纸后手动重取一次主色（清缓存 → 重新解析 → 立即预览）。"""
+        wallpaper_color.reset_cache()
+        hues = wallpaper_color.auto_hues(force=True)
+        if not self.cb_widget_auto.isChecked():
+            self.cb_widget_auto.setChecked(True)
+        self._update_wallpaper_label()
+        self._preview_colors()
+        self.preview.setText(
+            f"已重新匹配壁纸颜色：主色相 {hues[0]}°，副色相 {hues[1]}°。保存后生效。"
+            if hues else "壁纸没有明显主色（纯灰或读取失败），将沿用当前配色。")
 
     def _check_updates_now(self) -> None:
         """设置页里的「检查更新」：直接走主程序的检查流程（含弹窗）。"""
         self.app.check_updates(manual=True)
 
     def _on_widget_follow_toggled(self, checked: bool) -> None:
+        auto = getattr(self, "cb_widget_auto", None)
+        auto_on = bool(auto and auto.isChecked())
         for row in (getattr(self, "hue_w_accent", None),
                     getattr(self, "hue_w_accent2", None),
                     getattr(self, "hue_w_bg", None)):
             if row is None:
                 continue
-            row.set_enabled(not checked)
+            # 自动匹配壁纸时，手动色相与「跟随主界面」都不生效，控件置灰
+            row.set_enabled(not checked and not auto_on)
         if hasattr(self, "hue_accent"):
             self._preview_colors()
 
@@ -410,7 +448,7 @@ class SettingsDialog(QDialog):
         L.addWidget(self.hour_box)
 
         self.ed_decimals = QSpinBox()
-        self.ed_decimals.setRange(0, 6)
+        self.ed_decimals.setRange(0, 8)          # v1.5.0：支持到小数点后 8 位
         self.ed_decimals.setValue(c.decimals)
         f4 = QFormLayout()
         f4.addRow("金额显示小数位", self.ed_decimals)
@@ -726,6 +764,21 @@ class SettingsDialog(QDialog):
         row_o.addWidget(self.slider_opacity, 1)
         row_o.addWidget(self.lb_opacity_val)
         v3.addLayout(row_o)
+        self.cb_widget_auto = QCheckBox("配色自动匹配桌面壁纸（取壁纸主色相）")
+        self.cb_widget_auto.setChecked(c.widget_auto_wallpaper)
+        v3.addWidget(self.cb_widget_auto)
+        row_auto = QHBoxLayout()
+        row_auto.setSpacing(8)
+        self.lb_wallpaper = QLabel("")
+        self.lb_wallpaper.setObjectName("Help")
+        self.lb_wallpaper.setWordWrap(True)
+        self.btn_wallpaper = QPushButton("重新匹配")
+        self.btn_wallpaper.setToolTip("重新读取当前桌面壁纸并提取主色（换壁纸后点这里）")
+        self.btn_wallpaper.clicked.connect(self._rematch_wallpaper)
+        row_auto.addWidget(self.lb_wallpaper, 1)
+        row_auto.addWidget(self.btn_wallpaper)
+        v3.addLayout(row_auto)
+
         self.cb_widget_follow = QCheckBox("配色与主界面一致")
         self.cb_widget_follow.setChecked(c.widget_follow_main)
         v3.addWidget(self.cb_widget_follow)
@@ -748,7 +801,8 @@ class SettingsDialog(QDialog):
         self.slider_scale.valueChanged.connect(self._preview_widget_appearance)
         self.slider_opacity.valueChanged.connect(self._preview_widget_appearance)
         self.cb_widget_follow.toggled.connect(self._on_widget_follow_toggled)
-        self._on_widget_follow_toggled(c.widget_follow_main)
+        self.cb_widget_auto.toggled.connect(self._on_widget_auto_toggled)
+        self._on_widget_auto_toggled(c.widget_auto_wallpaper)
         L.addWidget(g3)
 
         note = QLabel("提示：小组件也可以在主窗口点「桌面小组件」一键开启，"
@@ -817,6 +871,7 @@ class SettingsDialog(QDialog):
         c.accent2_hue = self.hue_accent2.hue()
         c.bg_hue = self.hue_bg.hue()
         c.widget_follow_main = self.cb_widget_follow.isChecked()
+        c.widget_auto_wallpaper = self.cb_widget_auto.isChecked()
         c.widget_accent_hue = self.hue_w_accent.hue()
         c.widget_accent2_hue = self.hue_w_accent2.hue()
         c.widget_bg_hue = self.hue_w_bg.hue()
