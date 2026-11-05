@@ -586,13 +586,13 @@ class MoyuApp(QWidget):
         box.setInformativeText(head + tail)
         btn_download = box.addButton("下载更新" if info.asset_url else "打开发布页",
                                      QMessageBox.AcceptRole)
-        btn_skip = None
-        if not info.asset_url:
-            btn_skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
-        else:
-            btn_skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
+        btn_skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
         box.addButton("稍后", QMessageBox.RejectRole)
+        if self.window:
+            self.window.clear_transient_button_state()
         box.exec()
+        if self.window:
+            self.window.clear_transient_button_state()
         clicked = box.clickedButton()
         if clicked is btn_download:
             if info.asset_url:
@@ -724,6 +724,10 @@ class MoyuApp(QWidget):
         self.save_config()
 
     def open_settings(self, tab: int | None = None) -> None:
+        # 模态对话框会吞掉按钮的 Leave 事件：打开前清一次，关闭后再清一次，
+        # 否则「⚙ 设置」按钮上会一直留着悬停高亮（像多了个悬浮框）
+        if self.window:
+            self.window.clear_transient_button_state()
         dlg = SettingsDialog(self, tab=tab)
         self.calendar_changed.connect(dlg.update_calendar_status)
         try:
@@ -733,6 +737,8 @@ class MoyuApp(QWidget):
                 self.calendar_changed.disconnect(dlg.update_calendar_status)
             except (RuntimeError, TypeError):
                 pass
+            if self.window:
+                self.window.clear_transient_button_state()
 
     def open_settings_color(self) -> None:
         """小组件右键入口：直接打开「外观与系统」页调整配色。"""

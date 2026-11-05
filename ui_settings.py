@@ -110,6 +110,13 @@ class HueRow(QWidget):
     def _pick(self) -> None:
         start = QColor(recolor(self.base_color, self.hue()))
         color = QColorDialog.getColor(start, self, "选择颜色（只取色相）")
+        # 取色器是模态窗口，会吞掉色板的 Leave 事件；关闭后手动复位悬停态
+        self.swatch.setDown(False)
+        self.swatch.setAttribute(Qt.WA_UnderMouse, False)
+        style = self.swatch.style()
+        style.unpolish(self.swatch)
+        style.polish(self.swatch)
+        self.swatch.update()
         if not color.isValid():
             return
         hue = color.hue()

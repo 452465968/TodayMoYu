@@ -138,14 +138,27 @@ class DesktopWidget(QWidget):
         self._gap1.changeSize(0, max(1, int(7 * s)), QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._gap2.changeSize(0, max(1, int(4 * s)), QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.pb.setFixedHeight(max(4, int(7 * s)))
-        self.setFixedSize(max(120, int(round(BASE_W * s))),
-                          max(80, int(round(BASE_H * s))))
+        self._fit_size(s)
         self.setToolTip(
             f"{APP_NAME} 桌面小组件\n"
             f"拖动移动 · 右下角拖拽无级缩放（{round(s * 100)}%）\n"
             f"滚轮缩放 · Shift+滚轮调透明度（{round(self.cfg.widget_opacity * 100)}%）\n"
             f"双击打开主窗口 · 右键更多选项")
         self.update()
+
+    def _fit_size(self, s: float) -> None:
+        """窗口尺寸 = max(基准尺寸 × 缩放, 布局最小需求)。
+
+        固定用「基准 × 缩放」会在低缩放比下比内容矮，金额 / 时长标签
+        就会被压扁裁切（v1.3.0 实测 100% 时布局最小高 220 > 窗口 190）；
+        按布局 minimumSize 撑开窗口后，任何缩放比下数字都完整可见。
+        """
+        self._content_layout.activate()
+        need = self._content_layout.minimumSize()
+        screen = self.app.available_geometry()
+        w = max(120, int(round(BASE_W * s)), min(need.width(), screen.width()))
+        h = max(80, int(round(BASE_H * s)), min(need.height(), screen.height()))
+        self.setFixedSize(w, h)
 
     def set_scale(self, value: float, persist: bool = True) -> None:
         """无级缩放：内部保留三位小数，任意数值都能停在原处。"""
@@ -274,6 +287,9 @@ class DesktopWidget(QWidget):
         self.lb_duration.setText(format_hms(snap.fished_seconds))
         self.pb.setValue(int(snap.progress * 1000))
         self.lb_status.setText(f"{snap.status_text} · 进度 {snap.progress * 100:.1f}%")
+        # 金额位数 / 状态文案变化会改变布局最小需求，必要时把窗口撑大一点，
+        # 保证任何时刻数字都不被裁切
+        self._fit_size(self._scale)
 
     # ------------------------------------------------------------------ #
     # 交互

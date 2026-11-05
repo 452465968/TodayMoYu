@@ -251,6 +251,17 @@ def qss(t: dict[str, str], *, card_alpha: float = 0.44, scale: float = 1.0) -> s
         border-radius: {px(4)}px; height: {px(8)}px; text-align: center;
     }}
     QProgressBar::chunk {{ background: {t['accent2']}; border-radius: {px(4)}px; }}
+    /* 主界面内容滚动区：完全透明，小窗口下出现细滚动条而不是裁切内容 */
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background: transparent; }}
+    QScrollBar:vertical {{ background: transparent; width: {px(7)}px; margin: 0; }}
+    QScrollBar::handle:vertical {{
+        background: rgba(120,132,170,0.38); border-radius: {px(3)}px;
+        min-height: 28px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: rgba(120,132,170,0.55); }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
     QToolTip {{
         background: {t['button']}; color: #FFFFFF; border: none;
         padding: 5px 8px; border-radius: 6px; font-size: {px(12)}px;

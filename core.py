@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "今天摸了吗"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
 WIDGET_TEXT_FILE = "widget.txt"

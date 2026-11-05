@@ -14,11 +14,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, QRect, Qt, QPoint
-from PySide6.QtGui import QColor, QMouseEvent
+from PySide6.QtCore import QEvent, QRect, Qt, QPoint, QTimer
+from PySide6.QtGui import QColor, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QProgressBar,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractButton, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
+    QProgressBar, QPushButton, QScrollArea, QScrollBar, QSizePolicy,
+    QToolTip, QVBoxLayout, QWidget,
 )
 
 import win32_extra as win
@@ -29,38 +30,22 @@ if TYPE_CHECKING:
     from main import MoyuApp
 
 WIN_W, WIN_H = 432, 724          # 默认尺寸（可任意调整）
-MIN_W, MIN_H = 340, 500          # 再小会牺牲可读性
+MIN_W, MIN_H = 300, 380          # 有滚动区兜底，允许缩得比内容最小尺寸更小
 MAX_SCALE, MIN_SCALE = 1.60, 0.70
 EDGE = 9                         # 边缘命中宽度（像素）
+ZOOM_STEP = 0.05                 # Ctrl/⌘+滚轮每格缩放 5%
+ZOOM_SAVE_DELAY_MS = 600         # 停止缩放后延迟落盘
 
 
 class DragHandle(QWidget):
-    """自绘标题栏：按住可拖动无边框窗口（顶部中间不参与缩放）。"""
+    """自绘标题栏：视觉上是标题条；拖动由主窗口的统一事件过滤器处理
+    （整个窗口的空白区域都支持按住拖动）。"""
 
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
         self.window = window
-        self._offset: QPoint | None = None
         self.setFixedHeight(38)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton:
-            self._offset = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._offset and (event.buttons() & Qt.LeftButton):
-            self.window.move(event.globalPosition().toPoint() - self._offset)
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._offset:
-            g = self.window.frameGeometry()
-            self.window.app.cfg.main_pos = [g.x(), g.y()]
-            self.window.app.save_config()
-        self._offset = None
-        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QWidget):
@@ -75,7 +60,12 @@ class MainWindow(QWidget):
         self._scale = 1.0
         self._applying = False
         self._resize: dict | None = None
+        self._drag_offset: QPoint | None = None
         self._spacers: list[tuple[object, int]] = []
+        self._zoom_save = QTimer(self)
+        self._zoom_save.setSingleShot(True)
+        self._zoom_save.setInterval(ZOOM_SAVE_DELAY_MS)
+        self._zoom_save.timeout.connect(self._save_size)
 
         self.outer = QVBoxLayout(self)
         self.outer.setContentsMargins(11, 11, 11, 11)   # 给柔光阴影留出空间
@@ -87,8 +77,25 @@ class MainWindow(QWidget):
         shadow.setColor(QColor(70, 78, 125, 48))
         self.bg.setGraphicsEffect(shadow)
 
-        self.L = QVBoxLayout(self.bg)
-        self.L.setContentsMargins(20, 8, 20, 12)
+        self.sL = QVBoxLayout(self.bg)
+        self.sL.setContentsMargins(20, 8, 20, 12)
+        self.sL.setSpacing(0)
+
+        # 内容放进透明滚动区：窗口被缩到比内容最小尺寸还小时出现滚动条，
+        # 任何元素都不会再被裁切或遮挡（v1.3.0 前小窗口下文字会被硬裁）
+        self.scroll = QScrollArea(self.bg)
+        self.scroll.setObjectName("MainScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.body = QWidget()
+        self.body.setObjectName("MainBody")
+        self.scroll.setWidget(self.body)
+        self.sL.addWidget(self.scroll)
+
+        self.L = QVBoxLayout(self.body)
+        self.L.setContentsMargins(0, 0, 0, 0)
         self.L.setSpacing(0)
 
         # ---------------- 标题栏 ---------------- #
@@ -339,6 +346,14 @@ class MainWindow(QWidget):
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         et = event.type()
+        if et == QEvent.Wheel:
+            # Ctrl(⌘)+滚轮：整体缩放；不带修饰键则把滚轮交给内容滚动
+            if isinstance(event, QWheelEvent) and (event.modifiers() & Qt.ControlModifier):
+                steps = event.angleDelta().y() / 120.0
+                if steps:
+                    self.zoom_by(steps * ZOOM_STEP)
+                return True
+            return False
         if et not in (QEvent.MouseButtonPress, QEvent.MouseMove,
                       QEvent.MouseButtonRelease, QEvent.Leave):
             return super().eventFilter(obj, event)
@@ -346,7 +361,7 @@ class MainWindow(QWidget):
             return super().eventFilter(obj, event)
 
         if et == QEvent.Leave:
-            if not self._resize:
+            if not self._resize and not self._drag_offset:
                 self.unsetCursor()
             return False
 
@@ -354,15 +369,32 @@ class MainWindow(QWidget):
               else event.globalPos())
         h, v = self._edges_at(self.mapFromGlobal(gp))
 
-        if et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton and (h or v):
-            self._resize = {"h": h, "v": v, "geo": QRect(self.geometry()), "gp": gp}
+        if et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if h or v:
+                self._resize = {"h": h, "v": v, "geo": QRect(self.geometry()), "gp": gp}
+                return True
+            # 整窗拖动：按在空白区域 / 标签 / 卡片上都直接拖窗口；
+            # 按钮与滚动条保持原本的点击行为
+            if isinstance(obj, (QAbstractButton, QScrollBar)):
+                return False
+            self._drag_offset = gp - self.frameGeometry().topLeft()
+            return True
+        if et == QEvent.MouseMove and self._drag_offset and (event.buttons() & Qt.LeftButton):
+            screen = self.app.available_geometry()
+            np = gp - self._drag_offset
+            np.setX(max(screen.left() - self.width() + 60,
+                        min(np.x(), screen.right() - 60)))
+            np.setY(max(screen.top(), min(np.y(), screen.bottom() - 24)))
+            self.move(np)
+            return True
+        if et == QEvent.MouseButtonRelease and self._drag_offset:
+            self._drag_offset = None
+            self._save_size()
             return True
         if et == QEvent.MouseButtonRelease and self._resize:
             self._resize = None
             self.unsetCursor()
-            self.app.cfg.main_size = [self.width(), self.height()]
-            self.app.cfg.main_pos = [self.x(), self.y()]
-            self.app.save_config()
+            self._save_size()
             self.apply_responsive(force=True)
             return True
         if et == QEvent.MouseMove and self._resize:
@@ -388,6 +420,29 @@ class MainWindow(QWidget):
             self.setCursor(self._cursor_for(h, v))
         return False
 
+    def _save_size(self) -> None:
+        self.app.cfg.main_size = [self.width(), self.height()]
+        self.app.cfg.main_pos = [self.x(), self.y()]
+        self.app.save_config()
+
+    def zoom_by(self, factor: float) -> None:
+        """Ctrl/⌘+滚轮整体缩放：等比改变窗口尺寸，布局按同一比例自适应。
+
+        缩放即改窗口大小，因此字号、间距、卡片全部跟着变，
+        不存在「内容被放大后溢出窗口」的遮挡问题。
+        """
+        s = max(MIN_SCALE, min(MAX_SCALE, self._scale * (1.0 + factor)))
+        w = min(int(round(WIN_W * s)), max(MIN_W, self.app.available_geometry().width()))
+        h = min(int(round(WIN_H * s)), max(MIN_H, self.app.available_geometry().height()))
+        if (w, h) == (self.width(), self.height()):
+            return
+        screen = self.app.available_geometry()
+        center = self.geometry().center()
+        x = max(screen.left(), min(center.x() - w // 2, screen.right() - w))
+        y = max(screen.top(), min(center.y() - h // 2, screen.bottom() - h))
+        self.setGeometry(x, y, w, h)
+        self._zoom_save.start()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.apply_responsive()
@@ -409,7 +464,7 @@ class MainWindow(QWidget):
             px = lambda v: max(1, int(round(v * s)))  # noqa: E731
             self.setStyleSheet(qss(palette_for(self.app.cfg), scale=s))
             self.outer.setContentsMargins(px(11), px(11), px(11), px(11))
-            self.L.setContentsMargins(px(20), px(8), px(20), px(12))
+            self.sL.setContentsMargins(px(20), px(8), px(20), px(12))
             self.handle.setFixedHeight(px(38))
             self.btn_top.setFixedWidth(px(46))
             self.btn_min.setFixedWidth(px(30))
@@ -435,6 +490,24 @@ class MainWindow(QWidget):
         self.bg.set_palette(pal)
         self.setStyleSheet(qss(pal, scale=self._scale))
         self.update()
+
+    def clear_transient_button_state(self) -> None:
+        """复位按钮上的悬停高亮 / 按下态 / 焦点框，并隐藏悬浮提示。
+
+        模态对话框（设置、更新弹窗）盖住按钮时会吞掉 Leave 事件，
+        关闭后按钮一直停留在 :hover 高亮，看起来像「按钮上多了个悬浮框」；
+        在打开与关闭对话框后各调用一次，把状态手动复位并强制重绘。
+        """
+        QToolTip.hideText()
+        self.unsetCursor()
+        for btn in self.findChildren(QAbstractButton):
+            btn.setDown(False)
+            btn.setAttribute(Qt.WA_UnderMouse, False)
+            btn.clearFocus()
+            style = btn.style()
+            style.unpolish(btn)
+            style.polish(btn)
+            btn.update()
 
     def set_always_on_top(self, flag: bool) -> None:
         base = Qt.FramelessWindowHint | Qt.Window
