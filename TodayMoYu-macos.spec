@@ -5,10 +5,15 @@
 产物：dist/今天摸了吗.app，再由 build_macos.py 打成 zip。
 """
 from pathlib import Path
+import re
 
 APP_NAME = "今天摸了吗"
 BUNDLE_ID = "com.shu1nm.todaymoyu"
 ROOT = Path(SPECPATH).resolve()
+
+# 版本号唯一真值在 core.py，避免 Info.plist 与程序版本脱节（v1.4.0 教训）
+_m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', (ROOT / "core.py").read_text(encoding="utf-8"))
+APP_VERSION = _m.group(1) if _m else "0.0.0"
 
 a = Analysis(
     [str(ROOT / "main.py")],
@@ -67,8 +72,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": APP_NAME,
         "CFBundleDisplayName": APP_NAME,
-        "CFBundleShortVersionString": "1.3.0",
-        "CFBundleVersion": "1.3.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "LSMinimumSystemVersion": "11.0",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.productivity",

@@ -86,6 +86,12 @@ def build_app() -> Path:
     for key in ("CFBundleIdentifier", "CFBundleExecutable", "CFBundleName"):
         if not info.get(key):
             raise SystemExit(f"Info.plist 缺少 {key}")
+    # 版本号必须与 core.py 一致（v1.4.0 曾出现 Info.plist 停留在旧版本）
+    sys.path.insert(0, str(ROOT))
+    from core import APP_VERSION as CORE_VERSION
+    if info.get("CFBundleShortVersionString") != CORE_VERSION:
+        raise SystemExit(
+            f"Info.plist 版本 {info.get('CFBundleShortVersionString')} != core.py {CORE_VERSION}")
     # 内置资源（节假日基线）必须随包
     frozen_res = APP / "Contents" / "Resources" / "resources" / "holiday_cn_2026.json"
     if not frozen_res.exists():
