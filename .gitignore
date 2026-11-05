@@ -1,0 +1,67 @@
+# ==========================================================================
+# 今天摸了吗 · 版本控制忽略规则
+# 原则：只提交源码、文档、构建脚本、必要资源；不提交密钥、本机数据、缓存与二进制产物。
+# ==========================================================================
+
+# ---- Python / 测试缓存 ----
+.venv/
+.venv2/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 本地运行时数据（含用户配置，可能含隐私）----
+config.json
+state.json
+widget.txt
+widget.json
+data/
+uploads/
+*.log
+crash.log
+app.log
+
+# ---- 敏感信息与本机私有目录（绝不入库）----
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+*.token
+credentials*
+.workbuddy/
+.codebuddy/
+.vscode/
+.idea/
+
+# ---- 构建产物与大二进制（用 build_portable.py 重建 / GitHub Releases 分发）----
+build/
+dist/
+*.zip
+*.exe
+*.msi
+*.7z
+*.tar.gz
+*.whl
+*.pyd
+*.dll
+*.o
+*.obj
+
+# ---- 操作系统噪声 ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# --------------------------------------------------------------------------
+# 需要保留的二进制资源（不要被上面的规则误伤）：
+#   resources/app.ico、app.png、preview_*.png|jpg
+#   launcher/rsrc_windows_amd64.syso（Go 编译 Windows exe 所需的图标资源）
+#   rainmeter/TodayMoYu/TodayMoYu.ini
+# --------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+# ==========================================================================
+# 保持各平台脚本的原始字节，禁止 Git 自动换行转换：
+#   *.bat      Windows 批处理，必须 CRLF + ASCII
+#   *.command  macOS 双击启动脚本，必须 LF + 0755
+#   Rainmeter *.ini 带 UTF-8 BOM，保持原样
+# ==========================================================================
+* -text
+
+*.bat -text whitespace=cr-at-eol
+*.command -text
+*.sh -text
+*.py -text
+*.md -text
+*.html -text
+*.ini -text
+*.spec -text
+*.json -text
+*.txt -text
+*.yml -text
+*.yaml -text
+
+# 二进制资源（不做任何文本处理）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.syso binary
