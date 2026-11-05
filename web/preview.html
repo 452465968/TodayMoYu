@@ -89,7 +89,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline:2px so
 
 /* ---------------- 柔光渐变主窗口 ---------------- */
 .app-window {
-  position:absolute; left:56px; top:42px; width:432px; height:706px; border-radius:20px;
+  position:absolute; left:56px; top:42px; width:432px; height:724px; border-radius:20px;
   background:
     radial-gradient(420px 380px at 10% 2%, var(--glow1), transparent 72%),
     radial-gradient(380px 340px at 95% 18%, var(--glow2), transparent 70%),
@@ -111,7 +111,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline:2px so
 }
 .win-btn:hover { background:rgba(255,255,255,.75); color:var(--text); }
 .win-btn.active { background:var(--soft); color:var(--accent2); }
-.win-body { padding:0 20px 12px; display:flex; flex-direction:column; height:660px; }
+.win-body { padding:0 20px 12px; display:flex; flex-direction:column; height:678px; }
 .row { display:flex; align-items:center; justify-content:space-between; }
 .date-line { font-size:13px; color:var(--muted); }
 .ghost {
@@ -330,6 +330,7 @@ table.diff td.diff { color:#C0392B; font-weight:700; }
       </div>
       <div class="status" id="statusText">摸鱼中</div>
       <div class="countdown" id="countdown">距离下班还有 —</div>
+      <div class="hint" id="dayKind">今日：工作日</div>
 
       <div class="card">
         <div class="field-label">今日混底薪【工资】</div>
@@ -355,7 +356,7 @@ table.diff td.diff { color:#C0392B; font-weight:700; }
       <div class="stat"><span>本月累计</span><b class="mono" id="month">¥0.0000</b></div>
       <div class="hint">已过的日子按满勤补算。本月只计已赚，不含亏损。</div>
       <div class="stat2"><span id="rate">时薪 ¥17.24 · 日薪 ¥129.30</span><span id="full">今日满勤可得 ¥129.30</span></div>
-      <div class="foot">今天摸了吗 · 摸鱼是带薪的　v1.0.0</div>
+      <div class="foot">今天摸了吗 · 摸鱼是带薪的　v1.1.0</div>
     </div>
   </div>
 
@@ -450,9 +451,25 @@ table.diff td.diff { color:#C0392B; font-weight:700; }
       <div class="field"><label>显示趣味文案</label><input type="checkbox" id="fun_enabled"></div>
       <div class="field"><label>目标名称</label><input type="text" id="fun_target_name"></div>
       <div class="field"><label>目标金额（元）</label><input type="number" id="fun_target_amount" step="10"></div>
-      <div class="field"><label>刷新间隔（ms）</label><input type="number" id="refresh_ms" min="50" max="5000" step="50"></div>
+      <div class="field"><label>刷新数值</label><input type="number" id="refresh_value" min="0.001" max="3600000" step="0.1"></div>
+      <div class="field"><label>刷新单位</label><select id="refresh_unit">
+        <option value="ms">毫秒</option><option value="s">秒</option>
+        <option value="min">分钟</option><option value="h">小时</option>
+      </select></div>
+      <div class="preview-line" id="refreshHint" style="margin-top:2px">主界面与日历同步共用同一个刷新间隔</div>
       <div class="field"><label>小组件透明度</label><input type="number" id="widget_opacity" min="0.3" max="1" step="0.05"></div>
       <div class="field"><label>小组件缩放</label><input type="number" id="widget_scale" min="0.6" max="2" step="0.05"></div>
+    </div>
+
+    <div class="group">
+      <h3>中国法定节假日与调休日历</h3>
+      <div class="field"><label>自动同步</label><input type="checkbox" id="calendar_auto_sync"></div>
+      <div class="preview-line" id="calendarStatus" style="margin-top:2px">日历状态读取中…</div>
+      <button class="tb-btn" id="syncCalendar" style="width:100%;margin-top:8px">立即同步（联网获取）</button>
+      <label style="font-size:11px;color:var(--muted);display:block;margin-top:6px;line-height:1.6">
+        日期严格区分：工作日 / 周末休息日 / 法定节假日放假 / 调休上班日。
+        放假不计摸鱼时长，调休上班日正常计薪；网络异常时沿用最近一次成功数据。
+      </label>
     </div>
 
     <div class="preview-line" id="settingsPreview">预览：—</div>
@@ -484,12 +501,42 @@ function defaultCfg(){
     lunch_start:"12:00", lunch_end:"13:30",
     workdays:[0,1,2,3,4], holidays:[], makeup_workdays:[], makeup_pairs:[],
     decimals:4, theme:"aurora", fun_enabled:true, fun_rotate:false,
-    fun_target_name:"一件 T 恤", fun_target_amount:50.0, refresh_ms:100,
+    fun_target_name:"一件 T 恤", fun_target_amount:50.0,
+    refresh_ms:100, refresh_value:100.0, refresh_unit:"ms",
+    calendar_auto_sync:true, calendar_holidays:[], calendar_makeup_workdays:[],
+    calendar_updated_at:"", calendar_source:"", calendar_years:[],
     always_on_top:false, minimize_to_tray:true, auto_start:false,
     widget_visible:true, widget_dock_desktop:false, widget_opacity:0.94,
-    widget_scale:1.0, widget_pos:null, main_pos:null
+    widget_scale:1.0, widget_pos:null, main_pos:null, main_size:null
   };
 }
+
+/* 与 core.py 的「数值 + 单位」范围校验一致 */
+const REFRESH_UNITS = {
+  ms:  {label:"毫秒", factor:1,       lo:50,    hi:3600000, step:50},
+  s:   {label:"秒",   factor:1000,    lo:0.05,  hi:3600,    step:0.1},
+  min: {label:"分钟", factor:60000,   lo:0.001, hi:60,      step:0.1},
+  h:   {label:"小时", factor:3600000, lo:0.001, hi:1,       step:0.01}
+};
+const REFRESH_MIN_MS = 50, REFRESH_MAX_MS = 3600000;
+function validateRefresh(value, unit){
+  const u = REFRESH_UNITS[unit];
+  if (!u) return {ok:false, msg:"时间单位无效", ms:100};
+  const v = Number(value);
+  if (!isFinite(v) || v <= 0) return {ok:false, msg:"刷新数值必须大于 0", ms:100};
+  const clampMs = x => Math.min(REFRESH_MAX_MS, Math.max(REFRESH_MIN_MS, Math.round(x * u.factor)));
+  if (v < u.lo || v > u.hi)
+    return {ok:false, msg:`${u.label}范围 ${u.lo} ~ ${u.hi}`, ms:clampMs(Math.min(u.hi, Math.max(u.lo, v)))};
+  return {ok:true, msg:"", ms:clampMs(v)};
+}
+function calendarSyncMs(ms){
+  return Math.max(15*60*1000, Math.min(24*60*60*1000, Math.max(1, Number(ms)||100) * 600));
+}
+const DAY_KIND_LABELS = {
+  work:"工作日", weekend:"休息日（周末）", holiday:"法定节假日 / 放假休息日",
+  makeup_work:"调休上班日", makeup_rest:"调休休息日（手动配对）"
+};
+const dayKindLabel = k => DAY_KIND_LABELS[k] || "工作日";
 function emptyState(){ return {day:"", paused:false, pause_start:null, pause_spans:[]}; }
 
 let cfg = loadJSON("moyu_preview_cfg", defaultCfg());
@@ -563,17 +610,27 @@ function pairMaps(c){
   }
   return {rests, works};
 }
+function autoCalendar(c){
+  return {
+    rests: new Set(c.calendar_holidays || []),
+    works: new Set(c.calendar_makeup_workdays || [])
+  };
+}
 function dayKind(c, d){
-  const k = dateKey(d), {rests, works} = pairMaps(c);
+  const k = dateKey(d), {rests, works} = pairMaps(c), auto = autoCalendar(c);
   if (c.makeup_workdays.includes(k) || works.has(k)) return "makeup_work";
   if (rests.has(k)) return "makeup_rest";
   if (c.holidays.includes(k)) return "holiday";
+  if (auto.works.has(k)) return "makeup_work";
+  if (auto.rests.has(k)) return "holiday";
   return c.workdays.includes(weekday(d)) ? "work" : "weekend";
 }
 function isWorkday(c, d){
-  const k = dateKey(d), {rests, works} = pairMaps(c);
+  const k = dateKey(d), {rests, works} = pairMaps(c), auto = autoCalendar(c);
   if (c.makeup_workdays.includes(k) || works.has(k)) return true;
   if (c.holidays.includes(k) || rests.has(k)) return false;
+  if (auto.works.has(k)) return true;
+  if (auto.rests.has(k)) return false;
   return c.workdays.includes(weekday(d));
 }
 function effectiveDay(c, now){
@@ -724,6 +781,7 @@ function advance(){
    ========================================================================= */
 const $ = id => document.getElementById(id);
 let lastSnap = null;
+let calendarStatus = {offline:false, text:"日历待同步"};
 
 /** 窄屏时整体等比缩放，而不是压缩宽度导致内部文字换行拥挤 */
 function applyWindowTransforms(){
@@ -732,7 +790,7 @@ function applyWindowTransforms(){
   const base = narrow ? Math.max(0.6, Math.min(1, avail / 432)) : 1;
   const w = $("mainWindow"), g = $("widget");
   w.style.transform = narrow ? `scale(${base})` : "none";
-  w.style.marginBottom = narrow ? `${Math.round(706 * (base - 1))}px` : "0px";
+  w.style.marginBottom = narrow ? `${Math.round(724 * (base - 1))}px` : "0px";
   const ws = base * cfg.widget_scale;
   g.style.transform = `scale(${ws})`;
   g.style.marginBottom = narrow ? `${Math.round(190 * (ws - 1))}px` : "0px";
@@ -751,6 +809,9 @@ function render(){
   $("dateText").textContent = snap.date_text;
   $("statusText").textContent = snap.status_text;
   $("countdown").textContent = snap.countdown_text;
+  const sync = calendarStatus.offline ? "日历离线沿用" :
+               cfg.calendar_updated_at ? "日历已同步" : "日历待同步";
+  $("dayKind").textContent = `今日：${dayKindLabel(snap.day_kind)}　·　${sync}`;
   $("money").textContent = formatMoney(snap.earned_today, dec);
   $("speed").textContent = `当前摸鱼进账 ¥${snap.per_second.toFixed(4)} / 秒　·　今日满勤 ¥${formatMoney(snap.full_pay,2)}`;
   $("duration").textContent = formatHMS(snap.fished_seconds);
@@ -780,7 +841,7 @@ function renderDebug(snap){
   const hhmm = s => `${pad2(Math.floor(s/3600)%24)}:${pad2(Math.floor(s%3600/60))}`;
   $("debugKV").innerHTML = [
     `<b>模拟时间</b> ${isoLocal(snap.now)}　<b>模式</b> ${mode==="real"?"真实":"演示"} ${speed}× ${playing?"运行中":"已暂停"}`,
-    `<b>归属日</b> ${dateKey(snap.day)}　<b>工作日</b> ${snap.is_workday?"是":"否"}　<b>状态</b> ${snap.status}　<b>日期性质</b> ${snap.day_kind}`,
+    `<b>归属日</b> ${dateKey(snap.day)}　<b>工作日</b> ${snap.is_workday?"是":"否"}　<b>状态</b> ${snap.status}　<b>日期性质</b> ${snap.day_kind}（${dayKindLabel(snap.day_kind)}）`,
     `<b>工作区间</b> ${snap.segments.map(([a,b])=>`${hhmm(a)}–${hhmm(b)}`).join(" + ")}`,
     `<b>今日满勤</b> ${(snap.full_seconds/3600).toFixed(2)} h　<b>时薪</b> ¥${snap.rate.toFixed(4)}　<b>每秒</b> ¥${snap.per_second.toFixed(6)}`,
     `<b>原始上班</b> ${snap.worked_seconds.toFixed(1)} s　<b>暂停扣除</b> ${snap.paused_seconds.toFixed(1)} s　<b>已摸鱼</b> ${snap.fished_seconds.toFixed(1)} s`,
@@ -849,8 +910,8 @@ $("overlay").onclick = closeDrawer;
 const CFG_KEYS = ["salary_mode","daily_salary","monthly_salary","pay_days_per_month",
   "hourly_divisor_hours","hourly_rate","decimals","work_start","work_end",
   "lunch_start","lunch_end","theme","fun_target_name","fun_target_amount",
-  "refresh_ms","widget_opacity","widget_scale"];
-const BOOL_KEYS = ["lunch_enabled","fun_enabled"];
+  "refresh_value","refresh_unit","widget_opacity","widget_scale"];
+const BOOL_KEYS = ["lunch_enabled","fun_enabled","calendar_auto_sync"];
 function openDrawer(){
   for (const k of CFG_KEYS) if ($(k)) $(k).value = cfg[k];
   for (const k of BOOL_KEYS) if ($(k)) $(k).checked = !!cfg[k];
@@ -890,6 +951,7 @@ function liveDraft(){
   d.makeup_pairs = readMakeupPairs();
   d.workdays = [...$("workdays").querySelectorAll("input:checked")].map(x=>Number(x.value));
   if (!d.workdays.length) d.workdays = [0,1,2,3,4];
+  d.refresh_ms = validateRefresh(d.refresh_value, d.refresh_unit).ms;
   return syncSalary(d);
 }
 function onSettingsInput(){
@@ -901,10 +963,16 @@ function onSettingsInput(){
   $("settingsPreview").textContent =
     `预览：日薪 ¥${formatMoney(d.daily_salary,2)}　时薪 ¥${s.rate.toFixed(2)}　每秒 ¥${s.per_second.toFixed(4)}　` +
     `每日有效工时 ${(s.full_seconds/3600).toFixed(2)} 小时　今日满勤可得 ¥${formatMoney(s.full_pay,2)}`;
+  const r = validateRefresh(d.refresh_value, d.refresh_unit);
+  const sm = calendarSyncMs(d.refresh_ms);
+  const period = sm < 3600000 ? `${Math.round(sm/60000)} 分钟` : `${(sm/3600000).toFixed(1)} 小时`;
+  $("refreshHint").textContent = (r.ok ? "" : `超出范围，将自动修正为 ${r.ms} ms；`) +
+    `主界面每 ${d.refresh_ms} ms 刷新，日历同步检查约每 ${period} 一次`;
 }
 ["salary_mode","daily_salary","monthly_salary","pay_days_per_month",
  "hourly_divisor_hours","hourly_rate","work_start","work_end",
- "lunch_start","lunch_end","lunch_enabled"].forEach(id => {
+ "lunch_start","lunch_end","lunch_enabled",
+ "refresh_value","refresh_unit","calendar_auto_sync"].forEach(id => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("input", onSettingsInput);
@@ -942,7 +1010,9 @@ $("saveCfg").onclick = () => {
   cfg.makeup_pairs = readMakeupPairs();
   syncSalary(cfg);   // 保存前按当前模式重新推导日薪，不保留旧值
   cfg.decimals = Math.min(6, Math.max(0, Math.round(cfg.decimals)));
-  cfg.refresh_ms = Math.min(5000, Math.max(50, cfg.refresh_ms));
+  const r = validateRefresh(cfg.refresh_value, cfg.refresh_unit);
+  if (!r.ok){ toast(`刷新间隔${r.msg}`); return; }
+  cfg.refresh_ms = r.ms;
   cfg.widget_opacity = Math.min(1, Math.max(.3, cfg.widget_opacity));
   cfg.widget_scale = Math.min(2, Math.max(.6, cfg.widget_scale));
   if (fullWorkSeconds(cfg) <= 0){ toast("有效工时为 0，请检查上下班时间与午休"); return; }
@@ -956,6 +1026,40 @@ $("exportCfg").onclick = () => {
   setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
   toast("config.json 已导出（字段名与桌面版一致）");
 };
+
+/* ---- 中国法定节假日与调休日历（联网同步 / 离线沿用） ---- */
+function applyCalendarData(payload){
+  if (payload && payload.ok){
+    cfg.calendar_holidays = payload.calendar_holidays || [];
+    cfg.calendar_makeup_workdays = payload.calendar_makeup_workdays || [];
+    cfg.calendar_updated_at = payload.calendar_updated_at || "";
+    cfg.calendar_source = payload.calendar_source || "";
+    cfg.calendar_years = payload.calendar_years || [];
+    calendarStatus = {offline:!!payload.offline, text:payload.status || "日历已同步"};
+  } else {
+    calendarStatus = {offline:true, text:(payload && payload.status) || "暂无日历数据，按每周工作日判定"};
+  }
+  $("calendarStatus").textContent = calendarStatus.text;
+  saveAll(); render();
+}
+async function syncCalendar(force){
+  if (!location.protocol.startsWith("http")){
+    calendarStatus = {offline:true,
+      text:"file:// 模式：沿用 config.json 里的日历数据；双击 start.command 启动服务后可联网同步"};
+    $("calendarStatus").textContent = calendarStatus.text;
+    return;
+  }
+  $("calendarStatus").textContent = "正在获取法定节假日与调休安排…";
+  try {
+    const resp = await fetch(`/api/calendar${force ? "?force=1" : ""}`);
+    applyCalendarData(await resp.json());
+    if (force) toast("法定节假日日历同步完成");
+  } catch(e){
+    calendarStatus = {offline:true, text:"日历接口不可用，沿用最近一次成功数据"};
+    $("calendarStatus").textContent = calendarStatus.text;
+  }
+}
+$("syncCalendar").onclick = () => syncCalendar(true);
 
 /* ---- 拖动（主窗口 + 小组件） ---- */
 function makeDraggable(el, handle){
@@ -1091,6 +1195,8 @@ if (location.protocol.startsWith("http")){
       area.innerHTML = `<div class="kv" style="color:#1D8A5B">Python 对照服务已在线。点击右上角「对照 Python 引擎」，即可把浏览器 JS 与真实 core.py 的计算结果逐字段比对。</div>`;
     }
   }).catch(()=>{});
+  // 自动获取国务院节假日与调休安排；失败时服务端会返回最近一次成功数据
+  syncCalendar(false);
 }
 </script>
 </body>

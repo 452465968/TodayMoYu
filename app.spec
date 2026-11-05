@@ -16,6 +16,7 @@ a = Analysis(
         (str(ROOT / "rainmeter" / "TodayMoYu" / "TodayMoYu.ini"), "rainmeter/TodayMoYu"),
         (str(ROOT / "resources" / "app.ico"), "resources"),
         (str(ROOT / "resources" / "app.png"), "resources"),
+        (str(ROOT / "resources" / "holiday_cn_2026.json"), "resources"),
     ],
     hiddenimports=["PySide6.QtNetwork", "PySide6.QtSvg"],
     hookspath=[],

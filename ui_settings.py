@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 )
 
 import win32_extra as win
-from core import APP_NAME, DAY_NAMES, Settings, app_data_dir, full_work_seconds, hourly_rate
+from core import (
+    APP_NAME, DAY_NAMES, REFRESH_UNITS, Settings, app_data_dir,
+    calendar_sync_interval_ms, day_kind_label, full_work_seconds, hourly_rate,
+    validate_refresh_interval,
+)
 from theme import THEMES, settings_qss, theme
 
 if TYPE_CHECKING:
@@ -125,6 +129,23 @@ class SettingsDialog(QDialog):
         area.setFrameShape(QFrame.NoFrame)
         area.setWidget(inner)
         return area
+
+    def _set_refresh_range(self, unit: str) -> None:
+        """按单位切换输入框的合法范围与步进，越界值自动夹回。"""
+        label, factor, lo, hi = REFRESH_UNITS.get(unit, REFRESH_UNITS["ms"])
+        step = {"ms": 50.0, "s": 0.1, "min": 0.1, "h": 0.01}.get(unit, 1.0)
+        decimals = {"ms": 0, "s": 2, "min": 3, "h": 3}.get(unit, 0)
+        self.ed_refresh.blockSignals(True)
+        self.ed_refresh.setDecimals(decimals)
+        self.ed_refresh.setRange(lo, hi)
+        self.ed_refresh.setSingleStep(step)
+        self.ed_refresh.setSuffix(f" {label}")
+        self.ed_refresh.blockSignals(False)
+
+    def update_calendar_status(self, text: str | None = None) -> None:
+        """接收后台同步结果 / 手动刷新时更新状态标签。"""
+        if hasattr(self, "lb_calendar"):
+            self.lb_calendar.setText(text or getattr(self.app, "calendar_status_text", ""))
 
     def _remember_size(self) -> None:
         self.app.cfg.settings_size = [self.width(), self.height()]
@@ -320,6 +341,34 @@ class SettingsDialog(QDialog):
         tip5.setWordWrap(True)
         v5.addWidget(tip5)
         L.addWidget(g5)
+
+        g6 = QGroupBox("中国法定节假日与调休日历（自动获取）")
+        v6 = QVBoxLayout(g6)
+        self.cb_calendar = QCheckBox("自动获取国务院办公厅发布的节假日与调休安排")
+        self.cb_calendar.setChecked(c.calendar_auto_sync)
+        v6.addWidget(self.cb_calendar)
+        self.lb_calendar = QLabel("")
+        self.lb_calendar.setObjectName("Help")
+        self.lb_calendar.setWordWrap(True)
+        v6.addWidget(self.lb_calendar)
+        cal_row = QHBoxLayout()
+        btn_sync = QPushButton("立即同步")
+        btn_sync.setToolTip("立刻联网刷新一次节假日与调休安排")
+        btn_sync.clicked.connect(lambda: self.app.sync_calendar_now(force=True))
+        cal_row.addWidget(btn_sync)
+        cal_row.addStretch(1)
+        v6.addLayout(cal_row)
+        legend = QLabel(
+            "日期判定：" + " / ".join(day_kind_label(k) for k in
+                                     ("work", "weekend", "holiday", "makeup_work")) +
+            "。放假休息日不计摸鱼时长；调休上班日按正常工作日实时计薪。"
+            "网络异常时沿用最近一次成功数据；手动填写的日期优先级更高。"
+        )
+        legend.setObjectName("Help")
+        legend.setWordWrap(True)
+        v6.addWidget(legend)
+        L.addWidget(g6)
+        self.update_calendar_status()
         L.addStretch(1)
         return page
 
@@ -369,12 +418,31 @@ class SettingsDialog(QDialog):
         self.cb_theme.setCurrentIndex(max(0, idx))
         f.addRow("配色主题", self.cb_theme)
 
-        self.ed_refresh = QSpinBox()
-        self.ed_refresh.setRange(50, 5000)
-        self.ed_refresh.setSingleStep(50)
-        self.ed_refresh.setSuffix(" ms")
-        self.ed_refresh.setValue(c.refresh_ms)
-        f.addRow("刷新间隔", self.ed_refresh)
+        self.ed_refresh = QDoubleSpinBox()
+        self.ed_refresh.setDecimals(3)
+        self.ed_refresh_value = self.ed_refresh          # 兼容旧代码引用
+        self.ed_refresh_unit = QComboBox()
+        for key, (label, _factor, lo, hi) in REFRESH_UNITS.items():
+            self.ed_refresh_unit.addItem(label, key)
+        idx = self.ed_refresh_unit.findData(c.refresh_unit)
+        self.ed_refresh_unit.setCurrentIndex(max(0, idx))
+        self._set_refresh_range(c.refresh_unit)
+        self.ed_refresh.setValue(c.refresh_value)
+        refresh_row = QHBoxLayout()
+        refresh_row.setSpacing(8)
+        refresh_row.addWidget(self.ed_refresh, 1)
+        refresh_row.addWidget(self.ed_refresh_unit)
+        refresh_wrap = QWidget()
+        refresh_wrap.setLayout(refresh_row)
+        f.addRow("数据刷新间隔", refresh_wrap)
+        self.lb_refresh_hint = QLabel("")
+        self.lb_refresh_hint.setObjectName("Help")
+        self.lb_refresh_hint.setWordWrap(True)
+        f.addRow(self.lb_refresh_hint)
+        self.ed_refresh_unit.currentIndexChanged.connect(
+            lambda _: (self._set_refresh_range(self.ed_refresh_unit.currentData()),
+                       self._update_preview()))
+        self.ed_refresh.valueChanged.connect(lambda _: self._update_preview())
         L.addLayout(f)
 
         g1 = QGroupBox("趣味文案（对应视频里「一件 T 恤」那句）")
@@ -491,7 +559,10 @@ class SettingsDialog(QDialog):
                           for i in range(self.list_makeup.count())]
 
         c.theme = self.cb_theme.currentData()
-        c.refresh_ms = self.ed_refresh.value()
+        c.refresh_value = self.ed_refresh.value()
+        c.refresh_unit = self.ed_refresh_unit.currentData()
+        c.normalize_refresh()          # 以「数值 + 单位」为真值推导 refresh_ms
+        c.calendar_auto_sync = self.cb_calendar.isChecked()
         c.fun_enabled = self.cb_fun.isChecked()
         c.fun_rotate = self.cb_rotate.isChecked()
         c.fun_target_name = self.ed_target_name.text().strip() or "一件 T 恤"
@@ -533,6 +604,16 @@ class SettingsDialog(QDialog):
                 f"预览：日薪 ¥{c.daily_salary:,.2f}　时薪 ¥{rate:.2f}　每秒 ¥{rate / 3600:.4f}<br>"
                 f"每日有效工时 {full_h:.2f} 小时　今日满勤可得 ¥{rate * full_h:,.2f}"
             )
+            ok, msg, ms = validate_refresh_interval(self.ed_refresh.value(),
+                                                    self.ed_refresh_unit.currentData())
+            check_ms = calendar_sync_interval_ms(ms)
+            period = (f"{check_ms / 60000:.0f} 分钟" if check_ms < 3_600_000
+                      else f"{check_ms / 3_600_000:.1f} 小时")
+            prefix = "刷新间隔超出范围，将自动修正为 " if not ok else ""
+            self.lb_refresh_hint.setText(
+                f"{prefix}{msg}主界面每 {ms} 毫秒刷新一次；同一个间隔也驱动调休日历同步检查"
+                f"（约每 {period} 一次，下限 15 分钟 / 上限 24 小时）。保存后立即生效。"
+            )
         except Exception as exc:
             self.preview.setText(f"参数有误：{exc}")
 
@@ -545,6 +626,10 @@ class SettingsDialog(QDialog):
         c = self._draft()
         if full_work_seconds(c) <= 0:
             self.preview.setText("保存失败：有效工时为 0，请检查上下班时间与午休区间。")
+            return
+        ok, msg, _ms = validate_refresh_interval(c.refresh_value, c.refresh_unit)
+        if not ok:
+            self.preview.setText(f"保存失败：刷新间隔{msg}")
             return
         c.settings_size = [self.width(), self.height()]
         self.app.apply_settings(c)

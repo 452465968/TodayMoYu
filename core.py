@@ -27,13 +27,94 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "今天摸了吗"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
 WIDGET_TEXT_FILE = "widget.txt"
 WIDGET_JSON_FILE = "widget.json"
 
 DAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+# 刷新间隔：数值 + 单位。ms 为换算后的毫秒数（保留字段，兼容旧配置与旧代码）。
+# 每种单位给出允许的填写范围，最终毫秒数再统一夹到 [50, 3_600_000]。
+REFRESH_UNITS: dict[str, tuple[str, float, float, float]] = {
+    "ms": ("毫秒", 1.0, 50.0, 3_600_000.0),
+    "s": ("秒", 1000.0, 0.05, 3600.0),
+    "min": ("分钟", 60_000.0, 0.001, 60.0),
+    "h": ("小时", 3_600_000.0, 0.001, 1.0),
+}
+REFRESH_MIN_MS = 50
+REFRESH_MAX_MS = 3_600_000
+
+# 调休日历同步调度：同一个刷新间隔同时驱动主界面刷新与日历同步检查。
+# 为避免高频请求，日历同步周期 = 刷新间隔 × 600 次 tick，且限制在 15 分钟 ~ 24 小时。
+CALENDAR_SYNC_TICKS = 600
+CALENDAR_SYNC_MIN_MS = 15 * 60 * 1000
+CALENDAR_SYNC_MAX_MS = 24 * 60 * 60 * 1000
+
+# 日期性质 → 中文标签：工作日 / 休息日 / 调休上班日必须一目了然
+DAY_KIND_LABELS: dict[str, str] = {
+    "work": "工作日",
+    "weekend": "休息日（周末）",
+    "holiday": "法定节假日 / 放假休息日",
+    "makeup_work": "调休上班日",
+    "makeup_rest": "调休休息日（手动配对）",
+}
+
+
+def day_kind_label(kind: str) -> str:
+    return DAY_KIND_LABELS.get(kind, "工作日")
+
+
+def validate_refresh_interval(value: Any, unit: str) -> tuple[bool, str, int]:
+    """校验「数值 + 单位」并返回毫秒。
+
+    返回 (是否合法, 错误说明, 可用的毫秒数)；即使不合法也给出夹取后的值，
+    便于 UI 直接展示「已自动修正为 X」而不中断用户输入。
+    """
+    if unit not in REFRESH_UNITS:
+        return False, "时间单位无效（可选：毫秒 / 秒 / 分钟 / 小时）", 100
+    label, factor, lo, hi = REFRESH_UNITS[unit]
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False, "刷新数值必须是数字", 100
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        return False, "刷新数值必须大于 0", 100
+    if v < lo or v > hi:
+        return False, f"{label}的取值范围是 {lo:g} ~ {hi:g}", int(
+            min(REFRESH_MAX_MS, max(REFRESH_MIN_MS, round(min(hi, max(lo, v)) * factor)))
+        )
+    ms = int(min(REFRESH_MAX_MS, max(REFRESH_MIN_MS, round(v * factor))))
+    return True, "", ms
+
+
+def calendar_sync_interval_ms(refresh_ms: int) -> int:
+    """由同一个刷新间隔推导调休日历同步检查周期。"""
+    try:
+        base = max(1, int(refresh_ms))
+    except (TypeError, ValueError):
+        base = 100
+    return max(CALENDAR_SYNC_MIN_MS, min(CALENDAR_SYNC_MAX_MS, base * CALENDAR_SYNC_TICKS))
+
+
+def _derive_refresh_parts(ms: int) -> tuple[float, str]:
+    """旧配置只有 refresh_ms 时，自动挑一个最自然的单位回填。
+
+    优先选能整除且数值 ≥ 1 的最大单位（3600000 → 1 小时、60000 → 1 分钟、
+    3000 → 3 秒）；否则用秒的小数表示（500 → 0.5 秒）；最后才退回毫秒。
+    """
+    ms = int(min(REFRESH_MAX_MS, max(REFRESH_MIN_MS, ms)))
+    for key in ("h", "min", "s"):
+        label, factor, lo, hi = REFRESH_UNITS[key]
+        v = ms / factor
+        if v >= 1 and lo <= v <= hi and abs(v - round(v)) < 1e-9:
+            return float(round(v)), key
+    if ms % 1000:
+        v = ms / 1000.0
+        if REFRESH_UNITS["s"][2] <= v <= REFRESH_UNITS["s"][3]:
+            return round(v, 6), "s"
+    return float(ms), "ms"
 
 # 趣味目标：与原视频「一件 T 恤」保持一致，其余为可选轮换
 FUN_TARGETS: list[tuple[str, float]] = [
@@ -121,7 +202,17 @@ class Settings:
     fun_rotate: bool = False
     fun_target_name: str = "一件 T 恤"
     fun_target_amount: float = 50.0
-    refresh_ms: int = 100
+    refresh_ms: int = 100                         # 派生值：由下面「数值 + 单位」换算
+    refresh_value: float = 100.0                  # 用户填写的数值
+    refresh_unit: str = "ms"                      # ms | s | min | h
+
+    # 自动获取的法定节假日 / 调休安排（最近一次成功数据，随配置一起落盘）
+    calendar_auto_sync: bool = True
+    calendar_holidays: list[str] = field(default_factory=list)        # 放假（休息日）
+    calendar_makeup_workdays: list[str] = field(default_factory=list)  # 调休上班日
+    calendar_updated_at: str = ""
+    calendar_source: str = ""
+    calendar_years: list[int] = field(default_factory=list)
 
     # 窗口 / 小组件
     always_on_top: bool = False
@@ -133,9 +224,21 @@ class Settings:
     widget_scale: float = 1.0
     widget_pos: list[int] | None = None
     main_pos: list[int] | None = None
+    main_size: list[int] | None = None           # 主窗口上次拖拽调整后的 [宽, 高]
     settings_size: list[int] | None = None   # 设置窗口上次调整后的 [宽, 高]
 
     # ------------------------------------------------------------------ #
+    def normalize_refresh(self) -> "Settings":
+        """以「数值 + 单位」为真值重新推导 refresh_ms；保存与加载都会调用。"""
+        ok, _msg, ms = validate_refresh_interval(self.refresh_value, self.refresh_unit)
+        if ok:
+            self.refresh_ms = ms
+        else:
+            # 非法输入：保留可用的毫秒值，并回填一组与之等价的合法数值/单位
+            self.refresh_ms = int(min(REFRESH_MAX_MS, max(REFRESH_MIN_MS, ms)))
+            self.refresh_value, self.refresh_unit = _derive_refresh_parts(self.refresh_ms)
+        return self
+
     @staticmethod
     def _num(value: Any, default: float, lo: float, hi: float) -> float:
         try:
@@ -234,7 +337,30 @@ class Settings:
         s.fun_rotate = bool(out["fun_rotate"])
         s.fun_target_name = str(out["fun_target_name"])[:24] or "一件 T 恤"
         s.fun_target_amount = cls._num(out["fun_target_amount"], 50.0, 0.01, 1e7)
-        s.refresh_ms = int(cls._num(out["refresh_ms"], 100, 50, 5000))
+        s.refresh_ms = int(cls._num(out["refresh_ms"], 100, REFRESH_MIN_MS, REFRESH_MAX_MS))
+
+        # 刷新间隔「数值 + 单位」：旧配置只有 refresh_ms 时自动推导，
+        # 新配置以 value+unit 为真值重新换算，保证保存 / 重开 / 再读取一致。
+        has_parts = "refresh_value" in raw and "refresh_unit" in raw
+        if has_parts:
+            s.refresh_value = cls._num(out["refresh_value"], 100.0, 0.0, 1e9)
+            raw_unit = out["refresh_unit"]
+            s.refresh_unit = raw_unit if raw_unit in REFRESH_UNITS else "ms"
+        else:
+            s.refresh_value, s.refresh_unit = _derive_refresh_parts(s.refresh_ms)
+        s.normalize_refresh()
+
+        # 自动日历：把「最近一次成功数据」随配置一起读回，离线也能继续用
+        s.calendar_auto_sync = bool(out["calendar_auto_sync"])
+        for key in ("calendar_holidays", "calendar_makeup_workdays"):
+            val = out[key]
+            s.__setattr__(key, sorted({x for x in val if isinstance(x, str) and len(x) == 10})
+                          if isinstance(val, list) else [])
+        s.calendar_updated_at = str(out["calendar_updated_at"])[:40]
+        s.calendar_source = str(out["calendar_source"])[:120]
+        years = out["calendar_years"]
+        s.calendar_years = sorted({int(y) for y in years if isinstance(y, int) and 1990 <= y <= 2100}) \
+            if isinstance(years, list) else []
 
         s.always_on_top = bool(out["always_on_top"])
         s.minimize_to_tray = bool(out["minimize_to_tray"])
@@ -243,7 +369,7 @@ class Settings:
         s.widget_dock_desktop = bool(out["widget_dock_desktop"])
         s.widget_opacity = cls._num(out["widget_opacity"], 0.94, 0.30, 1.0)
         s.widget_scale = cls._num(out["widget_scale"], 1.0, 0.6, 2.0)
-        for key in ("widget_pos", "main_pos", "settings_size"):
+        for key in ("widget_pos", "main_pos", "main_size", "settings_size"):
             val = out[key]
             s.__setattr__(key, [int(val[0]), int(val[1])] if isinstance(val, list) and len(val) == 2
                           and isinstance(val[0], int) and isinstance(val[1], int) else None)
@@ -257,6 +383,7 @@ class Settings:
     def save(self, directory: Path | None = None) -> None:
         # 写盘前再同步一次，保证任何保存路径落下的都是当前模式下的一致值
         self.sync_salary()
+        self.normalize_refresh()
         _atomic_write((directory or app_data_dir()) / CONFIG_FILE,
                       json.dumps(asdict(self), ensure_ascii=False, indent=2))
 
@@ -341,26 +468,48 @@ def _pair_maps(cfg: Settings) -> tuple[set[str], set[str]]:
     return rests, works
 
 
+def _calendar_maps(cfg: Settings) -> tuple[set[str], set[str]]:
+    """自动日历中的「放假休息日」与「调休上班日」（最近一次成功数据）。"""
+    rests = set(getattr(cfg, "calendar_holidays", []) or [])
+    works = set(getattr(cfg, "calendar_makeup_workdays", []) or [])
+    return rests, works
+
+
 def is_workday(cfg: Settings, d: date) -> bool:
+    """优先级：手动补班 > 手动休息 > 法定调休上班 > 法定放假 > 每周工作日。"""
     key = d.isoformat()
     rests, works = _pair_maps(cfg)
-    # 补班日优先级最高（可覆盖周末 / 节假日 / 调休休息日）
+    auto_rests, auto_works = _calendar_maps(cfg)
     if key in cfg.makeup_workdays or key in works:
         return True
     if key in cfg.holidays or key in rests:
+        return False
+    if key in auto_works:
+        return True
+    if key in auto_rests:
         return False
     return d.weekday() in cfg.workdays
 
 
 def day_kind(cfg: Settings, d: date) -> str:
-    """当天性质：work / weekend / holiday / makeup_work / makeup_rest"""
+    """当天性质：work / weekend / holiday / makeup_work / makeup_rest。
+
+    holiday 同时涵盖手动额外休息日与自动日历里的法定放假日；
+    makeup_work 同时涵盖手动与自动日历里的调休上班日。
+    """
     key = d.isoformat()
     rests, works = _pair_maps(cfg)
+    auto_rests, auto_works = _calendar_maps(cfg)
+    # 手动配置优先于自动日历；补班 > 休息 > 每周工作日
     if key in cfg.makeup_workdays or key in works:
         return "makeup_work"
     if key in rests:
         return "makeup_rest"
     if key in cfg.holidays:
+        return "holiday"
+    if key in auto_works:
+        return "makeup_work"
+    if key in auto_rests:
         return "holiday"
     return "work" if d.weekday() in cfg.workdays else "weekend"
 
@@ -516,6 +665,10 @@ class Snapshot:
     @property
     def full_hours(self) -> float:
         return self.full_seconds / 3600.0
+
+    @property
+    def day_kind_label(self) -> str:
+        return day_kind_label(self.day_kind)
 
 
 def format_money(value: float, decimals: int = 4) -> str:

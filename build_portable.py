@@ -38,8 +38,9 @@ WHEELS = {
         "https://pypi.tuna.tsinghua.edu.cn/packages/aa/29/e77f3fba5337f2d98f977eece0fd24cda6cf7d83be2699514d2ca1d34f6c/shiboken6-6.8.3-cp39-abi3-win_amd64.whl",
 }
 
-SOURCE_FILES = ["main.py", "core.py", "theme.py", "ui_main.py",
-                "ui_settings.py", "ui_widget.py", "win32_extra.py"]
+SOURCE_FILES = ["main.py", "core.py", "holiday_calendar.py", "theme.py",
+                "ui_main.py", "ui_settings.py", "ui_widget.py",
+                "win32_extra.py"]
 PTH_CONTENT = "\r\n".join([
     "python311.zip", ".", "Lib\\site-packages", "app",
     "# import site stays disabled on purpose (embeddable distribution)",
@@ -78,9 +79,16 @@ runtime 文件夹里。不用装 Python，不用 pip install，不用联网，�
   「月薪 ÷ 月计薪天数 ÷ 时薪折算工时 × 每日有效工时」立即重算并保存，
   重新打开也不会残留旧值。
 - 开机自启：设置 → 外观与系统 → 勾选「开机自动启动」。
+- 刷新间隔：设置 → 外观与系统 → 填「数值 + 单位」（毫秒 / 秒 / 分钟 / 小时），
+  保存后立即生效，主界面刷新与调休日历同步检查共用同一个周期。
+- 窗口大小：主窗口可从任意边缘 / 四角按住鼠标连续拖拽改变宽高，尺寸会自动记住。
+- 法定节假日：设置 → 工时 → 「自动获取国务院办公厅发布的节假日与调休安排」，
+  程序联网获取当年 + 次年的放假与调休上班日；断网时沿用最近一次成功数据
+  （随程序还附带 2026 年出厂基线）。工作日 / 休息日 / 调休上班日严格区分。
 
 【数据与配置】
-%APPDATA%\\今天摸了吗\\ 下的 config.json / state.json / widget.txt / widget.json。
+%APPDATA%\\今天摸了吗\\ 下的 config.json / state.json / widget.txt / widget.json
+/ holiday_calendar.json（最近一次成功的节假日日历缓存）。
 卸载时直接删除本文件夹即可，不会写注册表（除非你开了开机自启，
 可在设置里取消勾选）。
 
@@ -169,7 +177,7 @@ def build(cache: Path, output: Path) -> None:
         "import sys; print('Python', sys.version); "
         "import PySide6; print('PySide6', PySide6.__version__); "
         "from PySide6 import QtCore,QtGui,QtWidgets,QtNetwork; print('Qt', QtCore.qVersion()); "
-        "import core,theme,ui_main,ui_settings,ui_widget,win32_extra,main; "
+        "import core,theme,ui_main,ui_settings,ui_widget,win32_extra,main,holiday_calendar; "
         "print('All project modules OK')")
     (stage / "SelfCheck.bat").write_bytes(
         ("@echo off\r\ncd /d \"%~dp0\"\r\n"
@@ -184,7 +192,7 @@ def build(cache: Path, output: Path) -> None:
         shutil.copy2(ROOT / name, app_dir / name)
     res = app_dir / "resources"
     res.mkdir(parents=True, exist_ok=True)
-    for name in ("app.ico", "app.png"):
+    for name in ("app.ico", "app.png", "holiday_cn_2026.json"):
         shutil.copy2(ROOT / "resources" / name, res / name)
     rain = app_dir / "rainmeter" / "TodayMoYu"
     rain.mkdir(parents=True, exist_ok=True)

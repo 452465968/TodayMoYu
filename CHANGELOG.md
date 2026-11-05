@@ -4,7 +4,59 @@
 格式与递增规则见 [docs/VERSIONING.md](docs/VERSIONING.md)；版本真值在 `core.py` 的 `APP_VERSION`。
 每次更新必须写全：变更目的 / 新增内容 / 修复内容 / 调整内容 / 影响范围 / 已知问题。
 
-**当前版本：`v1.0.0`**
+**当前版本：`v1.1.0`**
+
+---
+
+## [1.1.0] - 2026-11-05
+
+**对应版本**：v1.1.0　**对应提交**：`[v1.1.0] feat(ui,calendar): 自定义刷新间隔、主窗口无级缩放与法定节假日自动同步`
+**对应标签**：`v1.1.0`
+
+### 变更目的
+
+1. 刷新间隔此前只有固定档位，无法覆盖「想要 0.5 秒高频跳动」或「十分钟才看一眼」的使用习惯，改为**数值 + 时间单位**自由组合并立即生效。
+2. 主窗口尺寸此前固定 432×706，小屏贴边、大屏浪费，改为**边缘 / 四角无级拖拽缩放**，任意尺寸下布局保持可用。
+3. 调休安排此前只能手动逐个填写日期，维护成本高且容易漏，改为**自动获取国务院办公厅发布的法定节假日与调休安排**（holiday-cn 数据源），断网时自动回退最近一次成功数据。
+
+### 新增内容
+
+- `holiday_calendar.py`（新模块）：中国法定节假日与调休日历的获取 / 解析 / 缓存 / 回退，只用标准库、可脱离 GUI 测试；主源 jsDelivr CDN + 备源 Fastly 镜像 / GitHub Raw，逐个超时重试；允许部分成功（某一年未公布不算失败）；每次成功原子写入 `%APPDATA%/今天摸了吗/holiday_calendar.json`，网络异常沿用该缓存，从未成功过则回退随程序附带的出厂基线。
+- `resources/holiday_cn_2026.json`：随程序附带的 2026 年国务院节假日安排出厂基线，首次运行即离线可用。
+- `core.py`：`refresh_value` / `refresh_unit`（ms/s/min/h 四种单位，`REFRESH_UNITS` 换算表）、`REFRESH_MIN_MS=50` / `REFRESH_MAX_MS=3600000` 范围校验 `validate_refresh_interval()`、`_derive_refresh_parts()` 把旧 `refresh_ms` 自动换算回自然单位；`calendar_auto` 开关与 `calendar_state`；`day_kind()` 优先级改为 **手动补班/上班 > 手动休息 > 自动补班 > 节假日放假/自动休息 > 周末/工作日**（用户手动配置始终压过数据源）；`calendar_sync_interval_ms()` = max(30 分钟, 刷新间隔 ×100)，上限 24 小时。
+- `ui_main.py`（重写）：去掉固定宽高，新增 `ResizeGrip` 八方向命中测试 + 连续拖拽缩放（`MIN_W=380 / MIN_H=560`），字号随宽度比例自适应，位置 clamp 到屏幕可用矩形；尺寸自动记忆。
+- `ui_settings.py`：刷新间隔改为「数值（QDoubleSpinBox）+ 单位（下拉）」双控件；新增「自动同步节假日」开关、日历状态标签（最近同步时间 / 覆盖年份 / 放假与调休天数 / 来源 / 同步周期）与「立即同步」按钮。
+- `main.py`：`CalendarSync(QThread)` 后台线程 + `synced` 信号驱动日历同步（不阻塞 UI）；托盘菜单新增「同步节假日」；刷新间隔变更后立即重启同步线程。
+- `web/preview.html` / `web/server.py`：网页端同步实现三项能力；新增 `GET /api/calendar` 返回日历缓存状态；主窗口改自适应高度。
+- `tests/test_calendar_and_refresh.py`（新增 14 项）：单位换算、旧 `refresh_ms` 兼容、范围钳制、日历解析、网络异常回退、三类日期判定、线程信号、User-Agent ASCII 回归等；全套 **59 项测试通过**。
+
+### 修复内容
+
+| 现象 | 根因 | 处理 |
+| --- | --- | --- |
+| 自动获取节假日 **100% 失败**（`UnicodeEncodeError`） | HTTP 请求头 User-Agent 携带中文应用名，urllib 按 latin-1 编码请求头时抛异常，三个数据源全部失败 | User-Agent 改为固定 ASCII 标识 `TodayMoYu/1.1 (+holiday-cn)`；新增回归测试锁死「请求头必须 ASCII」 |
+| 自动日历的补班日压过用户手动设置的休息日 | 自动数据源优先级高于手动配置 | `day_kind()` 优先级重排：手动配置 > 自动日历 > 周末规则，用户意图永远最高 |
+| 旧配置 `refresh_ms=500` 被推导成不自然的「0.5 秒」 | 整除优先的单位推导策略对非整数值不友好 | `_derive_refresh_parts()` 对不可整除值回退为毫秒原值（500ms），语义直观 |
+
+### 调整内容
+
+- **刷新调度**：主界面刷新与日历同步检查共用同一个用户周期（日历实际检查频率为刷新间隔 ×100，30 分钟 ~ 24 小时），修改后保存即生效，无需重启。**向后兼容**：旧 `config.json` 的 `refresh_ms` 自动换算成数值 + 单位，无需手工迁移。
+- **主窗口**：`432×706` 固定尺寸 → `380×560` 起步的无级缩放；窗口宽高记忆进 `config.json`。**向后兼容**。
+- **day_kind 判定**：由「手动配对 > 周末」两级改为「手动 > 自动日历 > 周末」三级；纯周末用户结果不变，**行为向后兼容**。
+- **打包**：`build_portable.py` / `app.spec` 加入 `holiday_calendar.py` 与 `resources/holiday_cn_2026.json`；免安装包仍为 82.3 MB。
+
+### 影响范围
+
+- 模块：`core.py`、`main.py`、`ui_main.py`（重写）、`ui_settings.py`、`holiday_calendar.py`（新）、`web/preview.html`、`web/server.py`、`build_portable.py`、`app.spec`、`tests/`、README / CHANGELOG。
+- 配置：新增 `refresh_value` / `refresh_unit` / `calendar_auto` / `calendar_state` 与日历字段（`calendar_holidays` / `calendar_makeup_workdays` / `calendar_updated_at` / `calendar_source` / `calendar_years`）、`window_size`；旧 `config.json` 全部字段自动兼容，升级无需任何操作。
+- 平台与交付物：Windows 10/11 x64 免安装 zip（v1.1.0 功能已含）；macOS 源码运行与网页预览同步更新；自动同步需联网（断网不影响已有数据与本地判定）。
+- 用户需做的事：从 v1.0.0 升级无需任何操作；如需自动节假日同步，在 设置 → 工时 → 打开「自动同步节假日」。
+
+### 已知问题
+
+- 2027 年国务院安排尚未公布，数据源返回空数据，程序按「未公布」处理而非失败，公布后自动补齐。
+- Windows 二进制仍未实机双击验证（macOS 开发环境），已做 PE / CRLF / 关键文件静态校验，包内 `SelfCheck.bat` 可自检。
+- 主窗口缩放到最小尺寸时趣味文案区会收窄，字号已按宽度比例缩放但超长自定义文案可能截尾。
 
 ---
 

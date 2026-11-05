@@ -15,18 +15,21 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import sys
+import threading
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QTimer, Qt
+from PySide6.QtCore import QRect, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget,
 )
 
+import holiday_calendar as hc
 import win32_extra as win
 from core import (
     APP_NAME, APP_VERSION, AppState, Settings, app_data_dir, compute,
@@ -81,6 +84,10 @@ def setup_logging() -> logging.Logger:
 
 
 class MoyuApp(QWidget):
+    # 后台线程把结果投递回 Qt 主线程，避免网络请求卡住界面
+    calendar_result = Signal(object)
+    calendar_changed = Signal(str)
+
     def __init__(self, args: list[str]):
         super().__init__()
         self.log = setup_logging()
@@ -92,6 +99,18 @@ class MoyuApp(QWidget):
         self._last_export = datetime.min
         self._really_quit = False
         self._time_offset = timedelta(0)
+        self._calendar_disabled = ("--no-calendar" in args
+                                   or bool(os.environ.get("MOYU_NO_CALENDAR")))
+        self._calendar_inflight = False
+        self._last_calendar_attempt: datetime | None = None
+        self.calendar_offline = False
+
+        # 启动即用「最近一次成功数据 / 出厂基线」，网络还没回来也不会缺日历
+        cached = hc.load_cache()
+        hc.apply_to_settings(self.cfg, cached)
+        self.calendar_status_text = hc.status_text(
+            cached, refresh_ms=self.cfg.refresh_ms)
+        self.calendar_result.connect(self._on_calendar_result)
 
         if "--at" in args:
             try:
@@ -121,6 +140,10 @@ class MoyuApp(QWidget):
 
         if self.cfg.widget_visible:
             self.toggle_widget(True)
+
+        # 启动后异步同步一次；后续同步由同一个刷新定时器按周期检查
+        if self.cfg.calendar_auto_sync and not self._calendar_disabled:
+            QTimer.singleShot(1200, lambda: self.sync_calendar_now(force=True))
 
         if "--minimized" in args:
             self.window.hide()
@@ -197,6 +220,7 @@ class MoyuApp(QWidget):
         self.act_pause.triggered.connect(self.toggle_pause)
         menu.addSeparator()
         menu.addAction("设置", self.open_settings)
+        menu.addAction("同步节假日日历", lambda: self.sync_calendar_now(force=True))
         menu.addAction("重置今日", self.reset_today)
         menu.addSeparator()
         menu.addAction("退出", self.quit_app)
@@ -287,9 +311,78 @@ class MoyuApp(QWidget):
                 )
             if hasattr(self, "act_pause"):
                 self.act_pause.setText("继续摸鱼" if self.state.paused else "暂停摸鱼")
+
+            # 同一个刷新间隔同时驱动主界面重画与调休日历同步检查
+            self._maybe_sync_calendar()
         except Exception as exc:
             # 单次刷新出错不能让整个应用崩掉
             self.log.error("刷新失败: %s\n%s", exc, traceback.format_exc())
+
+    # ------------------------------------------------------------------ #
+    # 法定节假日 / 调休日历自动同步
+    # ------------------------------------------------------------------ #
+    def _maybe_sync_calendar(self) -> None:
+        if self._calendar_disabled or not self.cfg.calendar_auto_sync:
+            return
+        if self._calendar_inflight:
+            return
+        every_ms = hc.calendar_sync_interval_ms(self.cfg.refresh_ms)
+        last = self._last_calendar_attempt
+        if last and (datetime.now() - last).total_seconds() * 1000 < every_ms:
+            return
+        self.sync_calendar_now(force=False)
+
+    def sync_calendar_now(self, force: bool = True) -> None:
+        """手动 / 定时触发同步；网络请求放在守护线程，绝不阻塞 UI。"""
+        if self._calendar_inflight:
+            if force:
+                self.notify(APP_NAME, "日历正在同步中，请稍候。")
+            return
+        self._calendar_inflight = True
+        # 用真实墙上时钟计时，避免 --at 模拟时钟加速导致反复联网
+        self._last_calendar_attempt = datetime.now()
+        self.calendar_status_text = "正在获取法定节假日与调休安排…"
+        self.calendar_changed.emit(self.calendar_status_text)
+        years = hc.target_years()
+
+        def worker() -> None:
+            try:
+                fresh, failed = hc.fetch_years(years, timeout=6.0)
+                self.calendar_result.emit({"ok": fresh.published,
+                                           "data": fresh, "failed": failed})
+            except Exception as exc:
+                self.calendar_result.emit({"ok": False, "data": hc.CalendarData(),
+                                           "failed": list(years), "error": str(exc)})
+
+        threading.Thread(target=worker, daemon=True, name="moyu-calendar").start()
+
+    def _on_calendar_result(self, res: dict) -> None:
+        self._calendar_inflight = False
+        cached = hc.load_cache()
+        fresh: hc.CalendarData = res.get("data") or hc.CalendarData()
+        failed: list[int] = res.get("failed") or []
+        if res.get("ok"):
+            merged = hc.merge_calendar(cached, fresh)
+            hc.save_cache(merged)                     # 更新「最近一次成功数据」
+            hc.apply_to_settings(self.cfg, merged)    # 同步写回 config.json
+            self.calendar_offline = bool(failed)
+            self.calendar_status_text = hc.status_text(
+                merged, offline=bool(failed), failed_years=failed,
+                refresh_ms=self.cfg.refresh_ms)
+            self.save_config()
+            self.log.info("日历同步成功：放假 %d 天 / 调休上班 %d 天；未更新年份 %s",
+                          len(merged.holidays), len(merged.makeup_workdays), failed)
+        else:
+            # 网络异常：沿用最近一次成功数据（缓存 + 配置双重兜底）
+            if cached.published:
+                hc.apply_to_settings(self.cfg, cached)
+            self.calendar_offline = True
+            self.calendar_status_text = hc.status_text(
+                cached, offline=True, failed_years=failed,
+                refresh_ms=self.cfg.refresh_ms)
+            self.log.warning("日历同步失败，沿用缓存：%s", res.get("error") or failed)
+        self.calendar_changed.emit(self.calendar_status_text)
+        self._tick()
 
     # ------------------------------------------------------------------ #
     # 操作
@@ -347,7 +440,14 @@ class MoyuApp(QWidget):
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self)
-        dlg.exec()
+        self.calendar_changed.connect(dlg.update_calendar_status)
+        try:
+            dlg.exec()
+        finally:
+            try:
+                self.calendar_changed.disconnect(dlg.update_calendar_status)
+            except (RuntimeError, TypeError):
+                pass
 
     def apply_settings(self, new_cfg: Settings) -> None:
         old = self.cfg
@@ -356,6 +456,7 @@ class MoyuApp(QWidget):
         if self.window:
             self.window.apply_theme(new_cfg.theme)
             self.window.set_always_on_top(new_cfg.always_on_top)
+            self.window.apply_responsive(force=True)
         if self.widget:
             self.widget.cfg = new_cfg
             self.widget.bg.set_theme(new_cfg.theme)
@@ -367,6 +468,17 @@ class MoyuApp(QWidget):
                 ok = self.widget.set_docked(new_cfg.widget_dock_desktop)
                 self.cfg.widget_dock_desktop = bool(ok and new_cfg.widget_dock_desktop)
         self.timer.setInterval(new_cfg.refresh_ms)
+
+        # 刷新间隔与自动同步开关修改后立即生效：
+        # 定时器周期已重设，日历同步检查周期也随下一个 tick 一起变化。
+        calendar_toggled_on = new_cfg.calendar_auto_sync and not old.calendar_auto_sync
+        self.calendar_status_text = hc.status_text(
+            hc.load_cache(), offline=self.calendar_offline,
+            refresh_ms=new_cfg.refresh_ms)
+        self.calendar_changed.emit(self.calendar_status_text)
+        if calendar_toggled_on and not self._calendar_disabled:
+            self._last_calendar_attempt = None
+            self.sync_calendar_now(force=True)
 
         if win.IS_WINDOWS and new_cfg.auto_start != old.auto_start:
             ok, msg = win.set_auto_start(new_cfg.auto_start)

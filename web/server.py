@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,10 +28,48 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
+import holiday_calendar as hc  # noqa: E402
 from core import (  # noqa: E402
     APP_NAME, AppState, Settings, compute, format_hms, format_money,
     full_work_seconds, hourly_rate, work_segments,
 )
+
+# 日历接口 5 分钟内复用结果，避免网页反复刷新把数据源打爆
+_CAL_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
+def calendar_payload(force: bool = False) -> dict:
+    now = time.time()
+    if not force and _CAL_CACHE["payload"] and now - _CAL_CACHE["ts"] < 300:
+        return _CAL_CACHE["payload"]
+    cached = hc.load_cache()
+    offline, failed = False, []
+    try:
+        fresh, failed = hc.fetch_years(hc.target_years(), timeout=5.0)
+        if fresh.published:
+            merged = hc.merge_calendar(cached, fresh)
+            hc.save_cache(merged)
+            cached = merged
+            offline = bool(failed)
+        else:
+            offline = True
+    except Exception:
+        offline, failed = True, hc.target_years()
+    payload = {
+        "ok": cached.published,
+        "offline": offline,
+        "failed_years": failed,
+        "holidays": cached.holidays,
+        "makeup_workdays": cached.makeup_workdays,
+        "calendar_holidays": cached.holidays,
+        "calendar_makeup_workdays": cached.makeup_workdays,
+        "calendar_updated_at": cached.updated_at,
+        "calendar_source": cached.source,
+        "calendar_years": sorted(cached.years),
+        "status": hc.status_text(cached, offline=offline, failed_years=failed),
+    }
+    _CAL_CACHE.update(ts=now, payload=payload)
+    return payload
 
 
 def build_state(raw: dict) -> AppState:
@@ -111,6 +150,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/ping":
             self._json({"ok": True, "app": APP_NAME, "engine": "core.py"})
+            return
+        if parsed.path == "/api/calendar":
+            try:
+                qs = parse_qs(parsed.query)
+                self._json(calendar_payload(force=qs.get("force", ["0"])[0] == "1"))
+            except Exception as exc:
+                self._json({"ok": False, "status": f"日历读取失败：{exc}"}, 200)
             return
         if parsed.path == "/api/snapshot":
             qs = parse_qs(parsed.query)
