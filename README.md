@@ -1,6 +1,6 @@
 # 今天摸了吗
 
-> **当前版本：`v1.1.0`** · 语义化版本 SemVer · [更新记录](CHANGELOG.md) · [版本规则与发布流程](docs/VERSIONING.md) · [版本号校验工具](scripts/bump_version.py)
+> **当前版本：`v1.2.0`** · 语义化版本 SemVer · [更新记录](CHANGELOG.md) · [版本规则与发布流程](docs/VERSIONING.md) · [版本号校验工具](scripts/bump_version.py)
 
 一款 Windows 桌面软件：把「上班摸鱼」实时折算成钱。主界面只突出两项数据 —— **今日混底薪【工资】** 与 **已摸鱼时长**，两者都按真实系统时钟逐秒跳动；附带桌面小组件、系统托盘、设置页与开机自启。
 

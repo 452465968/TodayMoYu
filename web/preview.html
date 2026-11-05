@@ -217,6 +217,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline:2px so
   border-radius:7px; background:rgba(255,255,255,.78); color:var(--text); font-family:inherit;
 }
 .field input[type=checkbox] { width:16px; height:16px; accent-color:var(--accent2); }
+.field input[type=range] { width:100%; accent-color:var(--accent2); }
+.hue-val { font-size:11px; color:var(--muted); min-width:34px; text-align:right; }
 .field textarea {
   width:100%; height:54px; font-size:11px; padding:6px 8px; border:1px solid var(--hair);
   border-radius:7px; background:rgba(255,255,255,.78); color:var(--text); resize:vertical;
@@ -457,8 +459,17 @@ table.diff td.diff { color:#C0392B; font-weight:700; }
         <option value="min">分钟</option><option value="h">小时</option>
       </select></div>
       <div class="preview-line" id="refreshHint" style="margin-top:2px">主界面与日历同步共用同一个刷新间隔</div>
-      <div class="field"><label>小组件透明度</label><input type="number" id="widget_opacity" min="0.3" max="1" step="0.05"></div>
-      <div class="field"><label>小组件缩放</label><input type="number" id="widget_scale" min="0.6" max="2" step="0.05"></div>
+      <div class="field"><label>主色色相</label><input type="range" id="accent_hue" min="-1" max="359" step="1"><span class="hue-val" id="accent_hue_v">跟随</span></div>
+      <div class="field"><label>副色色相</label><input type="range" id="accent2_hue" min="-1" max="359" step="1"><span class="hue-val" id="accent2_hue_v">跟随</span></div>
+      <div class="field"><label>背景色相</label><input type="range" id="bg_hue" min="-1" max="359" step="1"><span class="hue-val" id="bg_hue_v">跟随</span></div>
+      <div class="preview-line" style="margin-top:-2px">色相 −1 = 跟随主题；只改色相，不动明度与饱和度，文字对比度始终达标。</div>
+      <div class="field"><label>小组件配色与主界面一致</label><input type="checkbox" id="widget_follow_main"></div>
+      <div class="field"><label>小组件主色</label><input type="range" id="widget_accent_hue" min="-1" max="359" step="1"><span class="hue-val" id="widget_accent_hue_v">跟随</span></div>
+      <div class="field"><label>小组件副色</label><input type="range" id="widget_accent2_hue" min="-1" max="359" step="1"><span class="hue-val" id="widget_accent2_hue_v">跟随</span></div>
+      <div class="field"><label>小组件背景色</label><input type="range" id="widget_bg_hue" min="-1" max="359" step="1"><span class="hue-val" id="widget_bg_hue_v">跟随</span></div>
+      <div class="field"><label>小组件透明度</label><input type="range" id="widget_opacity" min="0.15" max="1" step="0.01"><span class="hue-val" id="widget_opacity_v">94%</span></div>
+      <div class="field"><label>小组件缩放</label><input type="range" id="widget_scale" min="0.5" max="3" step="0.01"><span class="hue-val" id="widget_scale_v">100%</span></div>
+      <div class="preview-line" style="margin-top:-2px">都是无级连续调节：也可以直接在小组件上用滚轮缩放、Shift+滚轮调透明度。</div>
     </div>
 
     <div class="group">
@@ -500,14 +511,17 @@ function defaultCfg(){
     work_start:"09:00", work_end:"18:00", lunch_enabled:true,
     lunch_start:"12:00", lunch_end:"13:30",
     workdays:[0,1,2,3,4], holidays:[], makeup_workdays:[], makeup_pairs:[],
-    decimals:4, theme:"aurora", fun_enabled:true, fun_rotate:false,
+    decimals:4, theme:"aurora", accent_hue:-1, accent2_hue:-1, bg_hue:-1,
+    fun_enabled:true, fun_rotate:false,
     fun_target_name:"一件 T 恤", fun_target_amount:50.0,
     refresh_ms:100, refresh_value:100.0, refresh_unit:"ms",
     calendar_auto_sync:true, calendar_holidays:[], calendar_makeup_workdays:[],
     calendar_updated_at:"", calendar_source:"", calendar_years:[],
     always_on_top:false, minimize_to_tray:true, auto_start:false,
     widget_visible:true, widget_dock_desktop:false, widget_opacity:0.94,
-    widget_scale:1.0, widget_pos:null, main_pos:null, main_size:null
+    widget_scale:1.0, widget_follow_main:true,
+    widget_accent_hue:-1, widget_accent2_hue:-1, widget_bg_hue:-1,
+    widget_pos:null, main_pos:null, main_size:null
   };
 }
 
@@ -797,8 +811,65 @@ function applyWindowTransforms(){
 }
 window.addEventListener("resize", applyWindowTransforms);
 
+/* 各主题的基准色（HSL：色相, 饱和度, 明度），自定义只替换色相 */
+const THEME_BASE = {
+  aurora: {accent:[15,.77,.43], accent2:[231,.58,.53], bg:[260,.62,.86]},
+  peach:  {accent:[14,.77,.41], accent2:[340,.46,.42], bg:[22,.70,.88]},
+  mint:   {accent:[16,.70,.41], accent2:[176,.52,.28], bg:[164,.50,.86]},
+};
+const hueCss = (hue, base) => (hue >= 0)
+  ? `hsl(${hue} ${Math.round(base[1]*100)}% ${Math.round(base[2]*100)}%)`
+  : "";
+const hueRgba = (hue, base, alpha) => (hue >= 0)
+  ? `hsla(${hue} ${Math.round(base[1]*100)}% ${Math.round(base[2]*100)}% / ${alpha})`
+  : "";
+const hueText = (hue) => hue >= 0 ? `${hue}°` : "跟随";
+
+/** 把自定义色相写进 CSS 变量：主窗口一组，小组件可单独覆盖 */
+function applyColors(c = cfg){
+  const b = THEME_BASE[c.theme] || THEME_BASE.aurora;
+  const root = document.documentElement.style;
+  const set = (name, val, el) => { if (val) (el || root).setProperty(name, val); else (el || root).removeProperty(name); };
+  set("--accent", hueCss(c.accent_hue, b.accent));
+  set("--accent2", hueCss(c.accent2_hue, b.accent2));
+
+  const w = $("widget");
+  const follow = c.widget_follow_main !== false;
+  const wa = follow ? c.accent_hue : c.widget_accent_hue;
+  const wa2 = follow ? c.accent2_hue : c.widget_accent2_hue;
+  const wbg = follow ? c.bg_hue : c.widget_bg_hue;
+  if (w){
+    set("--accent", hueCss(wa, b.accent), w.style);
+    set("--accent2", hueCss(wa2, b.accent2), w.style);
+    set("--glow1", hueRgba((wbg >= 0 ? wbg + 4 : -1), b.bg, .55), w.style);
+    set("--glow2", hueRgba((wbg >= 0 ? wbg - 12 : -1), b.bg, .45), w.style);
+    set("--glow3", hueRgba((wbg >= 0 ? wbg + 26 : -1), b.bg, .40), w.style);
+  }
+  // 主窗口背景光斑同样跟着背景色相
+  const g1 = hueRgba(c.bg_hue >= 0 ? c.bg_hue + 4 : -1, b.bg, .55);
+  const g2 = hueRgba(c.bg_hue >= 0 ? c.bg_hue - 12 : -1, b.bg, .45);
+  const g3 = hueRgba(c.bg_hue >= 0 ? c.bg_hue + 26 : -1, b.bg, .40);
+  if (g1) root.setProperty("--glow1", g1); else root.removeProperty("--glow1");
+  if (g2) root.setProperty("--glow2", g2); else root.removeProperty("--glow2");
+  if (g3) root.setProperty("--glow3", g3); else root.removeProperty("--glow3");
+
+  for (const [id, hue] of [["accent_hue", c.accent_hue],
+                           ["accent2_hue", c.accent2_hue],
+                           ["bg_hue", c.bg_hue],
+                           ["widget_accent_hue", c.widget_accent_hue],
+                           ["widget_accent2_hue", c.widget_accent2_hue],
+                           ["widget_bg_hue", c.widget_bg_hue]]){
+    const out = $(id + "_v");
+    if (out) out.textContent = hueText(hue);
+  }
+  const so = $("widget_scale_v"), oo = $("widget_opacity_v");
+  if (so) so.textContent = `${Math.round(c.widget_scale * 100)}%`;
+  if (oo) oo.textContent = `${Math.round(c.widget_opacity * 100)}%`;
+}
+
 function applyTheme(){
   document.documentElement.setAttribute("data-theme", cfg.theme);
+  applyColors();
 }
 function render(){
   advance();
@@ -829,6 +900,7 @@ function render(){
   $("wStatus").textContent = `${snap.status_text} · 进度 ${(snap.progress*100).toFixed(1)}%`;
 
   $("widget").style.opacity = cfg.widget_opacity;
+  applyColors();
   applyWindowTransforms();
   $("widget").classList.toggle("hidden", !cfg.widget_visible);
   $("widgetBtn").classList.toggle("active", !!cfg.widget_visible);
@@ -910,8 +982,10 @@ $("overlay").onclick = closeDrawer;
 const CFG_KEYS = ["salary_mode","daily_salary","monthly_salary","pay_days_per_month",
   "hourly_divisor_hours","hourly_rate","decimals","work_start","work_end",
   "lunch_start","lunch_end","theme","fun_target_name","fun_target_amount",
-  "refresh_value","refresh_unit","widget_opacity","widget_scale"];
-const BOOL_KEYS = ["lunch_enabled","fun_enabled","calendar_auto_sync"];
+  "refresh_value","refresh_unit","widget_opacity","widget_scale",
+  "accent_hue","accent2_hue","bg_hue",
+  "widget_accent_hue","widget_accent2_hue","widget_bg_hue"];
+const BOOL_KEYS = ["lunch_enabled","fun_enabled","calendar_auto_sync","widget_follow_main"];
 function openDrawer(){
   for (const k of CFG_KEYS) if ($(k)) $(k).value = cfg[k];
   for (const k of BOOL_KEYS) if ($(k)) $(k).checked = !!cfg[k];
@@ -944,7 +1018,7 @@ function fillMakeupPairs(){
 /* ---- 设置抽屉里的实时联动（与桌面版一致） ---- */
 function liveDraft(){
   const d = Object.assign({}, cfg);
-  for (const k of CFG_KEYS){ const el = $(k); if (el) d[k] = el.type === "number" ? Number(el.value) : el.value; }
+  for (const k of CFG_KEYS){ const el = $(k); if (el) d[k] = (el.type === "number" || el.type === "range") ? Number(el.value) : el.value; }
   for (const k of BOOL_KEYS){ if ($(k)) d[k] = $(k).checked; }
   d.holidays = parseDates($("holidays").value);
   d.makeup_workdays = parseDates($("makeup_workdays").value);
@@ -963,16 +1037,31 @@ function onSettingsInput(){
   $("settingsPreview").textContent =
     `预览：日薪 ¥${formatMoney(d.daily_salary,2)}　时薪 ¥${s.rate.toFixed(2)}　每秒 ¥${s.per_second.toFixed(4)}　` +
     `每日有效工时 ${(s.full_seconds/3600).toFixed(2)} 小时　今日满勤可得 ¥${formatMoney(s.full_pay,2)}`;
+  applyColors(d);
+  const wEl = $("widget");
+  if (wEl){
+    wEl.style.opacity = d.widget_opacity;
+    const narrow = window.innerWidth <= 1000;
+    const avail = Math.max(240, $("desktop").clientWidth - 32);
+    const base = narrow ? Math.max(0.6, Math.min(1, avail / 432)) : 1;
+    const ws = base * d.widget_scale;
+    wEl.style.transform = `scale(${ws})`;
+    wEl.style.marginBottom = narrow ? `${Math.round(190 * (ws - 1))}px` : "0px";
+  }
   const r = validateRefresh(d.refresh_value, d.refresh_unit);
   const sm = calendarSyncMs(d.refresh_ms);
   const period = sm < 3600000 ? `${Math.round(sm/60000)} 分钟` : `${(sm/3600000).toFixed(1)} 小时`;
   $("refreshHint").textContent = (r.ok ? "" : `超出范围，将自动修正为 ${r.ms} ms；`) +
     `主界面每 ${d.refresh_ms} ms 刷新，日历同步检查约每 ${period} 一次`;
 }
+function round3(v){ return Math.round(v * 1000) / 1000; }
 ["salary_mode","daily_salary","monthly_salary","pay_days_per_month",
  "hourly_divisor_hours","hourly_rate","work_start","work_end",
  "lunch_start","lunch_end","lunch_enabled",
- "refresh_value","refresh_unit","calendar_auto_sync"].forEach(id => {
+ "refresh_value","refresh_unit","calendar_auto_sync",
+ "accent_hue","accent2_hue","bg_hue",
+ "widget_accent_hue","widget_accent2_hue","widget_bg_hue",
+ "widget_opacity","widget_scale","widget_follow_main"].forEach(id => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("input", onSettingsInput);
@@ -1000,7 +1089,7 @@ $("saveCfg").onclick = () => {
   for (const k of CFG_KEYS){
     if (!$(k)) continue;
     const el = $(k);
-    cfg[k] = el.type === "number" ? Number(el.value) : el.value;
+    cfg[k] = (el.type === "number" || el.type === "range") ? Number(el.value) : el.value;
   }
   for (const k of BOOL_KEYS) if ($(k)) cfg[k] = $(k).checked;
   cfg.holidays = parseDates($("holidays").value);
@@ -1013,8 +1102,12 @@ $("saveCfg").onclick = () => {
   const r = validateRefresh(cfg.refresh_value, cfg.refresh_unit);
   if (!r.ok){ toast(`刷新间隔${r.msg}`); return; }
   cfg.refresh_ms = r.ms;
-  cfg.widget_opacity = Math.min(1, Math.max(.3, cfg.widget_opacity));
-  cfg.widget_scale = Math.min(2, Math.max(.6, cfg.widget_scale));
+  cfg.widget_opacity = Math.min(1, Math.max(.15, cfg.widget_opacity));
+  cfg.widget_scale = Math.min(3, Math.max(.5, round3(cfg.widget_scale)));
+  for (const k of ["accent_hue","accent2_hue","bg_hue","widget_accent_hue",
+                   "widget_accent2_hue","widget_bg_hue"]){
+    cfg[k] = Math.max(-1, Math.min(359, Math.round(Number(cfg[k]) || -1)));
+  }
   if (fullWorkSeconds(cfg) <= 0){ toast("有效工时为 0，请检查上下班时间与午休"); return; }
   applyTheme(); saveAll(); restartTimer(); render(); closeDrawer(); toast("设置已保存，界面与配置同步更新");
 };

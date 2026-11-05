@@ -4,7 +4,45 @@
 格式与递增规则见 [docs/VERSIONING.md](docs/VERSIONING.md)；版本真值在 `core.py` 的 `APP_VERSION`。
 每次更新必须写全：变更目的 / 新增内容 / 修复内容 / 调整内容 / 影响范围 / 已知问题。
 
-**当前版本：`v1.1.0`**
+**当前版本：`v1.2.0`**
+
+---
+
+## [1.2.0] - 2026-11-05
+
+**对应版本**：v1.2.0　**对应提交**：`[v1.2.0] feat(ui,platform): 主界面自定义配色、小组件无级外观调节与 macOS 平台适配`
+**对应标签**：`v1.2.0`
+
+### 变更目的
+让界面配色可以随个人喜好调整而不破坏可读性；把小组件的大小 / 透明度从「档位」升级为无级连续调节；补齐 macOS 平台的系统级支持（开机自启、菜单栏、.app 打包），实现 Windows / macOS 功能对齐。
+
+### 新增内容
+- **主界面自定义配色**：设置 → 外观与系统新增「自定义配色」，可分别调整主色 / 副色 / 背景的色相（0–359°，滑块或系统取色器），拖动即时预览；只替换色相、保留明度与饱和度，文字对比度始终达标；「恢复主题默认配色」一键还原。
+- **小组件自定义配色**：可跟随主界面，也可单独设置小组件自己的主色 / 副色 / 背景色相。
+- **小组件无级缩放**：50%–300% 连续调节（1% 步进），右下角拖拽、滚轮、右键菜单 ±1%/±5% 均可；透明度 15%–100% 连续调节（Shift+滚轮或滑块）；设置页滑块同步为连续取值。
+- **macOS 平台适配**：LaunchAgent 开机自启（`~/Library/LaunchAgents/com.shu1nm.todaymoyu.plist`，无需管理员权限）；macOS 系统菜单栏（打开主窗口 ⌘1 / 设置 ⌘, / 暂停 ⌘P / 显示小组件 / 退出 ⌘Q）；`build_macos.py` 一键产出标准 `.app`（多尺寸 icns 图标、Info.plist、静态校验）并打 zip。
+- 平台能力探测：`SUPPORTS_AUTOSTART` 统一 Windows / macOS 的开机自启开关行为；「贴到桌面」仍为 Windows 专属，macOS 上自动禁用并给出提示。
+
+### 修复内容
+- 自动获取节假日 100% 失败 → 根因：HTTP 请求头 User-Agent 含中文应用名，urllib 按 latin-1 编码请求头时抛 `UnicodeEncodeError` → 处理：改为 ASCII 标识 `TodayMoYu/1.2 (+holiday-cn)`，并新增回归测试锁死。
+- macOS 菜单栏从未创建成功 → 根因：误用了不存在的 `QApplication.menuBar()`，异常被静默吞掉 → 处理：改为无父级 `QMenuBar`（macOS 全局菜单栏），并保留引用防止被回收。
+- 启动即崩溃（ImportError）→ 根因：`QColorDialog` 误从 `PySide6.QtGui` 导入（实际在 QtWidgets）→ 处理：修正导入来源。
+- 自动日历补班日压过用户手动休息日 → 处理：调整 `day_kind` 优先级为「手动配置 > 自动日历 > 周末」。
+
+### 调整内容
+- 小组件缩放范围从 60%–200%（5% 档位）放宽为 50%–300% 连续取值；透明度下限从 30% 放宽到 15%。**向后兼容**：旧 config.json 直接读取，取值会被钳制到新范围内。
+- 设置对话框支持 `tab` 参数直达指定页（小组件右键「单独设置配色」入口）；取消设置时配色一并回滚。
+- 托盘 / 右键菜单样式改为按当前配色实时生成；macOS 菜单动作同时挂到主窗口，保证快捷键在窗口内生效。
+
+### 影响范围
+- 模块：core.py（配色字段与 effective_hues）、theme.py（palette / recolor / palette_for）、ui_main.py、ui_widget.py、ui_settings.py、main.py、win32_extra.py、web/preview.html、holiday_calendar.py、build_macos.py（新增）、TodayMoYu-macos.spec（新增）、scripts/qt_offscreen_check.py（新增，26 项离屏 GUI 验证）。
+- 配置：新增 `accent_hue` / `accent2_hue` / `bg_hue` / `widget_follow_main` / `widget_accent_hue` / `widget_accent2_hue` / `widget_bg_hue`（默认 -1 = 跟随主题）；`widget_scale` / `widget_opacity` 范围放宽。完全兼容旧 config.json。
+- 平台与交付物：Windows 免安装 zip（`今天摸了吗_Windows免安装版.zip`）、macOS 应用包（`今天摸了吗_macOS版.zip`，解压得到 .app）。
+- 用户需做的事：macOS 用户首次开启「开机自启」即可；其余为无。
+
+### 已知问题
+- macOS「贴到桌面」依赖 Windows WorkerW 图层，不可用（已自动禁用并以「主窗口置顶」替代）。
+- 2027 年法定节假日安排尚未公布，日历同步会提示「未公布」，公布后自动补齐。
 
 ---
 

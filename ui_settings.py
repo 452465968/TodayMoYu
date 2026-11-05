@@ -6,9 +6,10 @@ import re
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QDate, QTime, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog, QDoubleSpinBox, QFormLayout,
+    QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDateEdit, QDialog,
+    QDoubleSpinBox, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QFrame,
     QSlider, QSpinBox, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
@@ -16,11 +17,12 @@ from PySide6.QtWidgets import (
 
 import win32_extra as win
 from core import (
-    APP_NAME, DAY_NAMES, REFRESH_UNITS, Settings, app_data_dir,
+    APP_NAME, DAY_NAMES, REFRESH_UNITS, WIDGET_SCALE_MAX, WIDGET_SCALE_MIN,
+    Settings, app_data_dir,
     calendar_sync_interval_ms, day_kind_label, full_work_seconds, hourly_rate,
     validate_refresh_interval,
 )
-from theme import THEMES, settings_qss, theme
+from theme import THEMES, palette, recolor, settings_qss, theme
 
 if TYPE_CHECKING:
     from main import MoyuApp
@@ -52,8 +54,97 @@ def _hhmm(w: QTimeEdit) -> str:
     return w.time().toString("HH:mm")
 
 
+class HueRow(QWidget):
+    """一行「色相」调节：色板 + 连续滑块 + 度数。
+
+    只改色相、不改明度饱和度，因此无论选什么颜色，文字对比度都不会被破坏；
+    点色板会打开系统取色器，取到的颜色只提取色相，其余保持主题设定。
+    """
+
+    def __init__(self, label: str, base_color: str, hue: int,
+                 on_change=None, parent=None):
+        super().__init__(parent)
+        self.base_color = base_color
+        self._label = label
+        self._cb = QCheckBox("跟随")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        name = QLabel(label)
+        name.setMinimumWidth(46)
+        self.swatch = QPushButton()
+        self.swatch.setFixedSize(38, 22)
+        self.swatch.setToolTip("点这里打开取色器（只取色相）")
+        self.swatch.clicked.connect(self._pick)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, 359)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(12)
+        self.val = QLabel("")
+        self.val.setFixedWidth(38)
+        row.addWidget(name)
+        row.addWidget(self.swatch)
+        row.addWidget(self.slider, 1)
+        row.addWidget(self.val)
+        row.addWidget(self._cb)
+
+        self._base_hue = max(0, QColor(base_color).hue())
+        self._on_change = on_change
+        self.slider.valueChanged.connect(self._refresh)
+        self._cb.toggled.connect(self._refresh)
+        self.set_hue(hue)
+
+    # -- 内部 -- #
+    def _refresh(self, *_args) -> None:
+        follow = self._cb.isChecked()
+        self.slider.setEnabled(not follow)
+        hue = self._base_hue if follow else self.slider.value()
+        color = recolor(self.base_color, hue)
+        self.swatch.setStyleSheet(
+            f"QPushButton {{ background: {color}; border: 1px solid rgba(120,132,170,0.35);"
+            f" border-radius: 6px; }}")
+        self.val.setText("跟随" if follow else f"{hue}°")
+        if self._on_change:
+            self._on_change()
+
+    def _pick(self) -> None:
+        start = QColor(recolor(self.base_color, self.hue()))
+        color = QColorDialog.getColor(start, self, "选择颜色（只取色相）")
+        if not color.isValid():
+            return
+        hue = color.hue()
+        if hue < 0:                       # 灰色没有色相，保持原值
+            return
+        self._cb.setChecked(False)
+        self.slider.setValue(hue)
+
+    # -- 对外 -- #
+    def hue(self) -> int:
+        return -1 if self._cb.isChecked() else self.slider.value()
+
+    def set_hue(self, hue: int) -> None:
+        follow = hue is None or hue < 0
+        self._cb.blockSignals(True)
+        self._cb.setChecked(follow)
+        self._cb.blockSignals(False)
+        if not follow:
+            self.slider.blockSignals(True)
+            self.slider.setValue(int(hue))
+            self.slider.blockSignals(False)
+        self._refresh()
+
+    def set_enabled(self, flag: bool) -> None:
+        self.setEnabled(bool(flag))
+
+    def set_base(self, color: str) -> None:
+        """主题切换后更新基准色：跟随态直接显示新主题的颜色。"""
+        self.base_color = color
+        self._base_hue = max(0, QColor(color).hue())
+        self._refresh()
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, app: "MoyuApp"):
+    def __init__(self, app: "MoyuApp", tab: int | None = None):
         super().__init__(app.window)
         self.app = app
         c = app.cfg
@@ -81,6 +172,9 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scroll(self._tab_salary(c)), "薪资")
         tabs.addTab(self._scroll(self._tab_schedule(c)), "工时")
         tabs.addTab(self._scroll(self._tab_display(c)), "外观与系统")
+        if tab is not None:
+            tabs.setCurrentIndex(max(0, min(tabs.count() - 1, int(tab))))
+        self.tabs = tabs
         root.addWidget(tabs, 1)
 
         self.preview = QLabel("")
@@ -109,6 +203,9 @@ class SettingsDialog(QDialog):
         root.addLayout(footer)
 
         self._orig_widget = (c.widget_scale, c.widget_opacity)
+        self._orig_colors = (c.accent_hue, c.accent2_hue, c.bg_hue,
+                             c.widget_follow_main, c.widget_accent_hue,
+                             c.widget_accent2_hue, c.widget_bg_hue)
         self._connect_preview()
         self._update_preview()
 
@@ -160,19 +257,91 @@ class SettingsDialog(QDialog):
     def _preview_widget_appearance(self) -> None:
         s = self.slider_scale.value() / 100.0
         o = self.slider_opacity.value() / 100.0
-        self.lb_scale_val.setText(f"{self.slider_scale.value()}%")
-        self.lb_opacity_val.setText(f"{self.slider_opacity.value()}%")
+        self.lb_scale_val.setText(f"{s * 100:.0f}%")
+        self.lb_opacity_val.setText(f"{o * 100:.0f}%")
         self.app.cfg.widget_scale = s
         self.app.cfg.widget_opacity = o
         self._apply_widget_appearance(s, o)
+        self._preview_colors()
 
     def reject(self) -> None:  # noqa: N802
-        """取消时把实时预览过的小组件外观还原。"""
+        """取消时把实时预览过的小组件外观与配色还原。"""
         s, o = self._orig_widget
         self.app.cfg.widget_scale = s
         self.app.cfg.widget_opacity = o
+        (self.app.cfg.accent_hue, self.app.cfg.accent2_hue, self.app.cfg.bg_hue,
+         self.app.cfg.widget_follow_main, self.app.cfg.widget_accent_hue,
+         self.app.cfg.widget_accent2_hue, self.app.cfg.widget_bg_hue) = self._orig_colors
         self._apply_widget_appearance(s, o)
+        if self.app.window:
+            self.app.window.apply_theme()
+        if self.app.widget:
+            self.app.widget.apply_appearance()
         super().reject()
+
+    # ------------------------------------------------------------------ #
+    # 配色：实时预览 / 恢复默认
+    # ------------------------------------------------------------------ #
+    def _collect_colors(self) -> None:
+        """把色相控件的值写进当前配置（预览用，保存时再随草稿落盘）。"""
+        c = self.app.cfg
+        for row, attr in ((self.hue_accent, "accent_hue"),
+                          (self.hue_accent2, "accent2_hue"),
+                          (self.hue_bg, "bg_hue")):
+            setattr(c, attr, row.hue())
+        c.widget_follow_main = self.cb_widget_follow.isChecked()
+        c.widget_accent_hue = self.hue_w_accent.hue()
+        c.widget_accent2_hue = self.hue_w_accent2.hue()
+        c.widget_bg_hue = self.hue_w_bg.hue()
+
+    def _preview_colors(self) -> None:
+        # 控件是逐个构造的：任何一个还没建好就先跳过，避免构造期回调炸掉
+        if not all(hasattr(self, n) for n in
+                   ("hue_accent", "hue_accent2", "hue_bg", "hue_w_accent",
+                    "hue_w_accent2", "hue_w_bg", "cb_widget_follow")):
+            return
+        self._collect_colors()
+        if self.app.window:
+            self.app.window.apply_theme()
+        if self.app.widget:
+            self.app.widget.apply_appearance()
+
+    def _on_color_changed(self) -> None:
+        self._preview_colors()
+        if hasattr(self, "preview"):
+            self.preview.setText("配色已实时预览：保存后写入配置，取消则恢复原样。")
+
+    def _reset_colors(self) -> None:
+        for row in (self.hue_accent, self.hue_accent2, self.hue_bg,
+                    self.hue_w_accent, self.hue_w_accent2, self.hue_w_bg):
+            row.set_hue(-1)
+        self.cb_widget_follow.setChecked(True)
+        self.preview.setText("已恢复主题默认配色，保存后生效。")
+
+    def _on_widget_follow_toggled(self, checked: bool) -> None:
+        for row in (getattr(self, "hue_w_accent", None),
+                    getattr(self, "hue_w_accent2", None),
+                    getattr(self, "hue_w_bg", None)):
+            if row is None:
+                continue
+            row.set_enabled(not checked)
+        if hasattr(self, "hue_accent"):
+            self._preview_colors()
+
+    def _on_theme_changed(self) -> None:
+        """切换主题时刷新基准色与对话框自身的配色，色相滑块保持不变。"""
+        key = self.cb_theme.currentData()
+        pal = palette(key)
+        for row, base in ((self.hue_accent, pal["accent"]),
+                          (self.hue_accent2, pal["accent2"]),
+                          (self.hue_bg, pal["glow2"]),
+                          (self.hue_w_accent, pal["accent"]),
+                          (self.hue_w_accent2, pal["accent2"]),
+                          (self.hue_w_bg, pal["glow2"])):
+            row.set_base(base)
+        self.setStyleSheet(settings_qss(palette(
+            key, self.hue_accent.hue(), self.hue_accent2.hue(), self.hue_bg.hue())))
+        self._preview_colors()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._remember_size()
@@ -417,6 +586,7 @@ class SettingsDialog(QDialog):
         idx = self.cb_theme.findData(c.theme)
         self.cb_theme.setCurrentIndex(max(0, idx))
         f.addRow("配色主题", self.cb_theme)
+        self.cb_theme.currentIndexChanged.connect(lambda _: self._on_theme_changed())
 
         self.ed_refresh = QDoubleSpinBox()
         self.ed_refresh.setDecimals(3)
@@ -445,6 +615,28 @@ class SettingsDialog(QDialog):
         self.ed_refresh.valueChanged.connect(lambda _: self._update_preview())
         L.addLayout(f)
 
+        # ---------------- 自定义配色（主界面） ---------------- #
+        base = palette(c.theme)
+        g0 = QGroupBox("自定义配色（主界面，拖动即时预览）")
+        v0 = QVBoxLayout(g0)
+        tip0 = QLabel("只改色相，不改明度与饱和度，因此文字对比度始终达标；"
+                      "点色块可打开系统取色器。")
+        tip0.setObjectName("Help")
+        tip0.setWordWrap(True)
+        v0.addWidget(tip0)
+        self.hue_accent = HueRow("主色", base["accent"], c.accent_hue, self._on_color_changed)
+        self.hue_accent2 = HueRow("副色", base["accent2"], c.accent2_hue, self._on_color_changed)
+        self.hue_bg = HueRow("背景", base["glow2"], c.bg_hue, self._on_color_changed)
+        for row in (self.hue_accent, self.hue_accent2, self.hue_bg):
+            v0.addWidget(row)
+        row_reset = QHBoxLayout()
+        self.btn_color_reset = QPushButton("恢复主题默认配色")
+        self.btn_color_reset.clicked.connect(self._reset_colors)
+        row_reset.addWidget(self.btn_color_reset)
+        row_reset.addStretch(1)
+        v0.addLayout(row_reset)
+        L.addWidget(g0)
+
         g1 = QGroupBox("趣味文案（对应视频里「一件 T 恤」那句）")
         f1 = QFormLayout(g1)
         self.cb_fun = QCheckBox("显示趣味文案")
@@ -466,13 +658,16 @@ class SettingsDialog(QDialog):
         self.cb_tray = QCheckBox("关闭主窗口时最小化到系统托盘（不退出）")
         self.cb_tray.setChecked(c.minimize_to_tray)
         self.cb_autostart = QCheckBox("开机自动启动")
-        self.cb_autostart.setChecked(win.is_auto_start() if win.IS_WINDOWS else c.auto_start)
-        self.cb_autostart.setEnabled(win.IS_WINDOWS)
+        self.cb_autostart.setChecked(win.is_auto_start() if win.SUPPORTS_AUTOSTART else c.auto_start)
+        self.cb_autostart.setEnabled(win.SUPPORTS_AUTOSTART)
         self.cb_widget = QCheckBox("启动时显示桌面小组件")
         self.cb_widget.setChecked(c.widget_visible)
         self.cb_dock = QCheckBox("小组件贴到桌面图层（Win+D 后仍可见）")
         self.cb_dock.setChecked(c.widget_dock_desktop)
         self.cb_dock.setEnabled(win.IS_WINDOWS)
+        if not win.IS_WINDOWS:
+            self.cb_dock.setChecked(False)
+            self.cb_dock.setToolTip("「贴到桌面」依赖 Windows 的 WorkerW 图层；macOS 请用「主窗口置顶」。")
         for cb in (self.cb_top, self.cb_tray, self.cb_autostart, self.cb_widget, self.cb_dock):
             v2.addWidget(cb)
         L.addWidget(g2)
@@ -480,9 +675,10 @@ class SettingsDialog(QDialog):
         g3 = QGroupBox("桌面小组件外观（拖动即时预览）")
         v3 = QVBoxLayout(g3)
         self.slider_scale = QSlider(Qt.Horizontal)
-        self.slider_scale.setRange(60, 200)
-        self.slider_scale.setSingleStep(5)
-        self.slider_scale.setPageStep(10)
+        # 无级缩放：50%–300% 连续可调，步进 1%
+        self.slider_scale.setRange(int(WIDGET_SCALE_MIN * 100), int(WIDGET_SCALE_MAX * 100))
+        self.slider_scale.setSingleStep(1)
+        self.slider_scale.setPageStep(5)
         self.slider_scale.setValue(int(round(c.widget_scale * 100)))
         self.lb_scale_val = QLabel(f"{int(round(c.widget_scale * 100))}%")
         self.lb_scale_val.setFixedWidth(48)
@@ -493,9 +689,10 @@ class SettingsDialog(QDialog):
         v3.addLayout(row_s)
 
         self.slider_opacity = QSlider(Qt.Horizontal)
-        self.slider_opacity.setRange(30, 100)
-        self.slider_opacity.setSingleStep(5)
-        self.slider_opacity.setPageStep(10)
+        # 透明度同样连续：15%–100%，步进 1%
+        self.slider_opacity.setRange(15, 100)
+        self.slider_opacity.setSingleStep(1)
+        self.slider_opacity.setPageStep(5)
         self.slider_opacity.setValue(int(round(c.widget_opacity * 100)))
         self.lb_opacity_val = QLabel(f"{int(round(c.widget_opacity * 100))}%")
         self.lb_opacity_val.setFixedWidth(48)
@@ -504,13 +701,29 @@ class SettingsDialog(QDialog):
         row_o.addWidget(self.slider_opacity, 1)
         row_o.addWidget(self.lb_opacity_val)
         v3.addLayout(row_o)
+        self.cb_widget_follow = QCheckBox("配色与主界面一致")
+        self.cb_widget_follow.setChecked(c.widget_follow_main)
+        v3.addWidget(self.cb_widget_follow)
+
+        self.hue_w_accent = HueRow("主色", base["accent"], c.widget_accent_hue,
+                                   self._on_color_changed)
+        self.hue_w_accent2 = HueRow("副色", base["accent2"], c.widget_accent2_hue,
+                                    self._on_color_changed)
+        self.hue_w_bg = HueRow("背景", base["glow2"], c.widget_bg_hue,
+                               self._on_color_changed)
+        for row in (self.hue_w_accent, self.hue_w_accent2, self.hue_w_bg):
+            v3.addWidget(row)
+
         tip3 = QLabel("文字始终按最高对比度渲染；这里调整的是整个小组件的通透度。"
+                     "小组件上还可以用右下角拖拽 / 滚轮连续缩放，Shift+滚轮调透明度。"
                      "点「保存设置」后写入配置，取消则恢复原值。")
         tip3.setObjectName("Help")
         tip3.setWordWrap(True)
         v3.addWidget(tip3)
         self.slider_scale.valueChanged.connect(self._preview_widget_appearance)
         self.slider_opacity.valueChanged.connect(self._preview_widget_appearance)
+        self.cb_widget_follow.toggled.connect(self._on_widget_follow_toggled)
+        self._on_widget_follow_toggled(c.widget_follow_main)
         L.addWidget(g3)
 
         note = QLabel("提示：小组件也可以在主窗口点「桌面小组件」一键开启，"
@@ -574,6 +787,13 @@ class SettingsDialog(QDialog):
         c.widget_dock_desktop = self.cb_dock.isChecked()
         c.widget_scale = self.slider_scale.value() / 100.0
         c.widget_opacity = self.slider_opacity.value() / 100.0
+        c.accent_hue = self.hue_accent.hue()
+        c.accent2_hue = self.hue_accent2.hue()
+        c.bg_hue = self.hue_bg.hue()
+        c.widget_follow_main = self.cb_widget_follow.isChecked()
+        c.widget_accent_hue = self.hue_w_accent.hue()
+        c.widget_accent2_hue = self.hue_w_accent2.hue()
+        c.widget_bg_hue = self.hue_w_bg.hue()
         # 关键：按当前薪资模式重新推导日薪，界面 / 保存 / 再次读取用的是同一个值
         return c.sync_salary()
 

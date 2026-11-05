@@ -46,6 +46,66 @@ def theme(key: str) -> dict[str, str]:
     return THEMES.get(key, THEMES["aurora"])
 
 
+# --------------------------------------------------------------------------- #
+# 自定义配色：只替换色相，明度 / 饱和度沿用原主题，因此对比度不会被破坏
+# --------------------------------------------------------------------------- #
+def _hsl(h: float, s: float, l: float) -> str:
+    c = QColor.fromHslF((h % 360.0) / 360.0, max(0.0, min(1.0, s)),
+                        max(0.0, min(1.0, l)))
+    return c.name().upper()
+
+
+def recolor(color: str, hue: int | None) -> str:
+    """把颜色换成指定色相，保留原色的饱和度与明度。"""
+    if hue is None or hue < 0:
+        return color
+    c = QColor(color)
+    h, s, l, _a = c.getHslF()
+    if h < 0:            # 灰色没有色相，给一个中等饱和度避免变成"没有颜色"
+        s = max(s, 0.28)
+    return _hsl(hue, s, l)
+
+
+def palette(key: str, accent_hue: int = -1, accent2_hue: int = -1,
+            bg_hue: int = -1) -> dict[str, str]:
+    """在主题基础上重算配色。
+
+    * 主色 / 副色：换色相，保留饱和度与明度 → 文字对比度不变；
+      `*_soft` 是同一色系的高明度版本，用作浅底 / 选中态。
+    * 背景：换色相后把底色压到高明度（近白），光斑提高饱和度，
+      保持「柔光渐变」质感，同时避免整窗变成浓烈的纯色块。
+    * 按钮色跟随主色但压暗，保证白字仍然清晰。
+    """
+    t = dict(theme(key))
+    if accent_hue >= 0:
+        t["accent"] = recolor(t["accent"], accent_hue)
+        t["accent_soft"] = recolor(t["accent_soft"], accent_hue)
+        t["button"] = _hsl(accent_hue, 0.30, 0.20)
+        t["button_hover"] = _hsl(accent_hue, 0.32, 0.28)
+    if accent2_hue >= 0:
+        t["accent2"] = recolor(t["accent2"], accent2_hue)
+        t["accent2_soft"] = recolor(t["accent2_soft"], accent2_hue)
+    if bg_hue >= 0:
+        stops = t["stops"].split("|")
+        # 三档近白底色：同一色相的轻微明度差，形成细腻渐变
+        t["stops"] = "|".join([
+            _hsl(bg_hue + 8, 0.55, 0.975),
+            _hsl(bg_hue - 6, 0.45, 0.968),
+            _hsl(bg_hue + 18, 0.50, 0.978),
+        ][:len(stops)] or stops)
+        t["glow1"] = _hsl(bg_hue + 4, 0.62, 0.86)
+        t["glow2"] = _hsl(bg_hue - 12, 0.58, 0.88)
+        t["glow3"] = _hsl(bg_hue + 26, 0.55, 0.87)
+    return t
+
+
+def palette_for(cfg, widget: bool = False) -> dict[str, str]:
+    """按 Settings 里的配色设置取调色板（主界面 / 小组件各一套）。"""
+    from core import effective_hues
+    a, a2, bg = effective_hues(cfg, widget=widget)
+    return palette(cfg.theme, a, a2, bg)
+
+
 def ui_font() -> str:
     if sys.platform == "win32":
         return '"Microsoft YaHei UI","Microsoft YaHei","Segoe UI"'
@@ -88,6 +148,11 @@ class SoftGradient(QWidget):
 
     def set_theme(self, key: str) -> None:
         self.t = theme(key)
+        self.update()
+
+    def set_palette(self, pal: dict[str, str]) -> None:
+        """直接套用一份（可能经过自定义配色推导的）调色板。"""
+        self.t = dict(pal)
         self.update()
 
     def set_alpha(self, value: float) -> None:

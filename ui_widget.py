@@ -18,13 +18,16 @@ from PySide6.QtWidgets import (
 )
 
 import win32_extra as win
-from core import APP_NAME, Snapshot, format_hms, format_money
-from theme import SoftGradient, qss, theme
+from core import (APP_NAME, WIDGET_SCALE_MAX, WIDGET_SCALE_MIN, Snapshot,
+                  format_hms, format_money)
+from theme import SoftGradient, palette_for, qss
 
 if TYPE_CHECKING:
     from main import MoyuApp
 
 BASE_W, BASE_H = 284, 190
+GRIP = 18            # 右下角无级缩放的命中范围（像素）
+SCALE_STEP = 0.01     # 滚轮 / 菜单的最小步进（1%，连续可调）
 
 
 class DesktopWidget(QWidget):
@@ -39,6 +42,9 @@ class DesktopWidget(QWidget):
         self._drag_cursor: QPoint | None = None
         self._drag_pos: tuple[int, int] | None = None
         self._moved = False
+        # 无级缩放的拖拽状态：记录起点与起点缩放比，拖动时逐像素换算
+        self._grip_origin: QPoint | None = None
+        self._grip_scale = 1.0
 
         self.setWindowTitle(f"{APP_NAME} · 桌面小组件")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
@@ -115,9 +121,9 @@ class DesktopWidget(QWidget):
     # 外观（缩放与透明度都作用于绘制层，跨平台一致）
     # ------------------------------------------------------------------ #
     def apply_appearance(self) -> None:
-        t = theme(self.cfg.theme)
+        t = palette_for(self.cfg, widget=True)
         s = self._scale
-        self.bg.set_theme(self.cfg.theme)
+        self.bg.set_palette(t)
         # 通透度做进背景绘制层：不与 WA_TranslucentBackground / 分层窗口机制冲突，
         # 也不依赖 setWindowOpacity（Windows 上常被忽略）。文字保持全不透明。
         self.bg.set_alpha(self.cfg.widget_opacity)
@@ -132,12 +138,18 @@ class DesktopWidget(QWidget):
         self._gap1.changeSize(0, max(1, int(7 * s)), QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._gap2.changeSize(0, max(1, int(4 * s)), QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.pb.setFixedHeight(max(4, int(7 * s)))
-        self.setFixedSize(int(BASE_W * s), int(BASE_H * s))
-        self.setToolTip(f"{APP_NAME} 桌面小组件\n拖动移动 · 双击打开主窗口 · 右键调整大小与透明度")
+        self.setFixedSize(max(120, int(round(BASE_W * s))),
+                          max(80, int(round(BASE_H * s))))
+        self.setToolTip(
+            f"{APP_NAME} 桌面小组件\n"
+            f"拖动移动 · 右下角拖拽无级缩放（{round(s * 100)}%）\n"
+            f"滚轮缩放 · Shift+滚轮调透明度（{round(self.cfg.widget_opacity * 100)}%）\n"
+            f"双击打开主窗口 · 右键更多选项")
         self.update()
 
     def set_scale(self, value: float, persist: bool = True) -> None:
-        self._scale = max(0.6, min(2.0, value))
+        """无级缩放：内部保留三位小数，任意数值都能停在原处。"""
+        self._scale = round(max(WIDGET_SCALE_MIN, min(WIDGET_SCALE_MAX, float(value))), 3)
         self.cfg.widget_scale = self._scale
         self.apply_appearance()
         self._clamp_to_screen()
@@ -145,7 +157,7 @@ class DesktopWidget(QWidget):
             self.app.save_config()
 
     def set_opacity(self, value: float, persist: bool = True) -> None:
-        self.cfg.widget_opacity = max(0.3, min(1.0, value))
+        self.cfg.widget_opacity = round(max(0.15, min(1.0, float(value))), 3)
         self.bg.set_alpha(self.cfg.widget_opacity)
         if persist:
             self.app.save_config()
@@ -269,8 +281,18 @@ class DesktopWidget(QWidget):
     def _hwnd(self) -> int:
         return int(self.winId()) if win.IS_WINDOWS else 0
 
+    def _on_grip(self, pos: QPoint) -> bool:
+        """是否点在右下角的缩放热区。"""
+        return (pos.x() >= self.width() - GRIP) and (pos.y() >= self.height() - GRIP)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
+            if self._on_grip(event.position().toPoint()):
+                # 进入无级缩放：记录锚点与起始比例，之后逐像素换算
+                self._grip_origin = QCursor.pos()
+                self._grip_scale = self._scale
+                self.setCursor(Qt.SizeFDiagCursor)
+                return
             self._drag_cursor = QCursor.pos()
             pos = win.window_global_pos(self._hwnd()) if win.IS_WINDOWS else None
             if pos is None:
@@ -281,6 +303,18 @@ class DesktopWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._grip_origin and (event.buttons() & Qt.LeftButton):
+            # 用「宽高两个方向的相对位移取平均」换算比例，横向竖向拖拽都跟手
+            cur = QCursor.pos()
+            dx = cur.x() - self._grip_origin.x()
+            dy = cur.y() - self._grip_origin.y()
+            delta = (dx / float(BASE_W) + dy / float(BASE_H)) / 2.0
+            self.set_scale(self._grip_scale + delta, persist=False)
+            return
+        if not (event.buttons() & Qt.LeftButton):
+            # 悬停在右下角时给出缩放光标，让「可拖拽」这件事可被发现
+            self.setCursor(Qt.SizeFDiagCursor if self._on_grip(event.position().toPoint())
+                           else Qt.ArrowCursor)
         if self._drag_cursor and self._drag_pos and (event.buttons() & Qt.LeftButton):
             cur = QCursor.pos()
             dx, dy = cur.x() - self._drag_cursor.x(), cur.y() - self._drag_cursor.y()
@@ -294,25 +328,43 @@ class DesktopWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._grip_origin:
+            # 松手才落盘：拖动过程只重绘，避免高频写配置
+            self._grip_origin = None
+            self.unsetCursor()
+            self.app.save_config()
+            return
         if self._moved:
             self.save_position()
         self._drag_cursor = None
         self._drag_pos = None
         super().mouseReleaseEvent(event)
 
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """滚轮连续缩放；Shift+滚轮连续调透明度（每次 1%，可细调）。"""
+        steps = event.angleDelta().y() / 120.0
+        if not steps:
+            return
+        if event.modifiers() & Qt.ShiftModifier:
+            self.set_opacity(self.cfg.widget_opacity + steps * 0.02)
+        else:
+            self.set_scale(self._scale + steps * SCALE_STEP * 2)
+        event.accept()
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self.app.show_main_window()
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        pal = palette_for(self.cfg, widget=True)
         menu = QMenu(self)
         menu.setStyleSheet(f"""
-            QMenu {{ background: #FFFFFF; color: {theme(self.cfg.theme)['text']};
+            QMenu {{ background: #FFFFFF; color: {pal['text']};
                      border: 1px solid rgba(120,132,170,0.25); border-radius: 10px;
                      padding: 6px; font-size: 12px; }}
             QMenu::item {{ padding: 7px 18px; border-radius: 6px; }}
-            QMenu::item:selected {{ background: {theme(self.cfg.theme)['accent2_soft']};
-                                    color: {theme(self.cfg.theme)['accent2']}; }}
+            QMenu::item:selected {{ background: {pal['accent2_soft']};
+                                    color: {pal['accent2']}; }}
             QMenu::separator {{ height: 1px; background: rgba(120,132,170,0.18); margin: 4px 8px; }}
         """)
 
@@ -325,36 +377,43 @@ class DesktopWidget(QWidget):
         act_top.setChecked(bool(self.cfg.always_on_top) and not self._docked)
         act_top.triggered.connect(lambda checked: (self.set_on_top(checked), self.app.save_config()))
 
-        act_dock = menu.addAction("贴到桌面（Win+D 后仍可见）")
+        act_dock = menu.addAction("贴到桌面（Win+D 后仍可见）" if win.IS_WINDOWS
+                                  else "贴到桌面（Windows 专属）")
         act_dock.setCheckable(True)
         act_dock.setChecked(self._docked)
         act_dock.setEnabled(win.IS_WINDOWS)
         act_dock.triggered.connect(self._on_dock_toggled)
 
+        # 无级调节：1% 细调 + 5% 快调，任意数值都能停下并保存
         appearance = menu.addMenu(
-            f"外观（当前 {round(self._scale * 100)}% · 透明度 {round(self.cfg.widget_opacity * 100)}%）")
-        for label, delta in (("放大 +10%", 0.1), ("缩小 −10%", -0.1)):
-            a = appearance.addAction(label)
+            f"外观（{self._scale:.0%} · 不透明度 {self.cfg.widget_opacity:.0%}）")
+        size_menu = appearance.addMenu(f"大小（当前 {self._scale:.0%}）")
+        for label, delta in (("放大 +5%", 0.05), ("放大 +1%", 0.01),
+                             ("缩小 −1%", -0.01), ("缩小 −5%", -0.05)):
+            a = size_menu.addAction(label)
             a.triggered.connect(lambda _=False, d=delta: self.set_scale(self._scale + d))
-        scale_menu = appearance.addMenu("大小档位")
-        for value, label in ((0.6, "60%"), (0.8, "80%"), (1.0, "100%（默认）"),
-                            (1.25, "125%"), (1.5, "150%"), (2.0, "200%")):
-            a = scale_menu.addAction(label)
-            a.setCheckable(True)
-            a.setChecked(abs(self._scale - value) < 0.01)
-            a.triggered.connect(lambda _=False, v=value: self.set_scale(v))
-        appearance.addSeparator()
-        for label, delta in (("更不透明 +10%", 0.1), ("更透明 −10%", -0.1)):
-            a = appearance.addAction(label)
+        size_menu.addSeparator()
+        a = size_menu.addAction("恢复 100%")
+        a.triggered.connect(lambda: self.set_scale(1.0))
+
+        opacity_menu = appearance.addMenu(
+            f"不透明度（当前 {self.cfg.widget_opacity:.0%}）")
+        for label, delta in (("更不透明 +5%", 0.05), ("更不透明 +1%", 0.01),
+                             ("更透明 −1%", -0.01), ("更透明 −5%", -0.05)):
+            a = opacity_menu.addAction(label)
             a.triggered.connect(
                 lambda _=False, d=delta: self.set_opacity(self.cfg.widget_opacity + d))
-        opacity_menu = appearance.addMenu("透明度档位")
-        for value, label in ((0.3, "30%"), (0.6, "60%"), (0.8, "80%"),
-                            (0.94, "94%（默认）"), (1.0, "100%")):
-            a = opacity_menu.addAction(label)
-            a.setCheckable(True)
-            a.setChecked(abs(self.cfg.widget_opacity - value) < 0.01)
-            a.triggered.connect(lambda _=False, v=value: self.set_opacity(v))
+        opacity_menu.addSeparator()
+        a = opacity_menu.addAction("恢复 94%")
+        a.triggered.connect(lambda: self.set_opacity(0.94))
+
+        appearance.addSeparator()
+        a = appearance.addAction("配色与主界面一致")
+        a.setCheckable(True)
+        a.setChecked(bool(self.cfg.widget_follow_main))
+        a.triggered.connect(self._toggle_follow_main)
+        a = appearance.addAction("单独设置小组件配色…")
+        a.triggered.connect(self.app.open_settings_color)
 
         menu.addSeparator()
         act_reset = menu.addAction("重置到屏幕右上角")
@@ -367,6 +426,11 @@ class DesktopWidget(QWidget):
         # popup 非阻塞：不占用事件循环，也不会打断实时刷新；保持引用避免被回收
         self._ctx_menu = menu
         menu.popup(pos)
+
+    def _toggle_follow_main(self, checked: bool) -> None:
+        self.cfg.widget_follow_main = bool(checked)
+        self.apply_appearance()
+        self.app.save_config()
 
     def _on_dock_toggled(self, checked: bool) -> None:
         ok = self.set_docked(checked)

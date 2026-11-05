@@ -35,7 +35,7 @@ from core import (
     APP_NAME, APP_VERSION, AppState, Settings, app_data_dir, compute,
     effective_day, export_widget_data, format_hms, format_money,
 )
-from theme import theme, ui_font
+from theme import palette_for, ui_font
 from ui_main import MainWindow
 from ui_settings import SettingsDialog
 from ui_widget import DesktopWidget
@@ -130,6 +130,8 @@ class MoyuApp(QWidget):
         self.window = MainWindow(self)
         self.window.set_always_on_top(self.cfg.always_on_top)
         self._init_tray()
+        if win.IS_MACOS:
+            self._init_macos_menubar()
 
         self.timer = QTimer(self)
         self.timer.setInterval(self.cfg.refresh_ms)
@@ -156,6 +158,53 @@ class MoyuApp(QWidget):
                 QTimer.singleShot(int(secs * 1000), self.quit_app)
             except (IndexError, ValueError):
                 pass
+
+    def _init_macos_menubar(self) -> None:
+        """macOS 的菜单栏是系统级入口：没有它连 ⌘Q / ⌘, 都不好用。
+
+        Windows / Linux 上不创建，保持原有的无菜单栏外观。
+        """
+        try:
+            from PySide6.QtGui import QAction, QKeySequence
+            from PySide6.QtWidgets import QMenuBar
+            # macOS 上无父级的 QMenuBar 即为系统全局菜单栏（QApplication 没有 menuBar()）
+            bar = QMenuBar()
+            self._mac_menubar = bar          # 保持引用，避免被 GC 后菜单栏消失
+            app_menu = bar.addMenu(APP_NAME)
+            act_show = QAction("打开主窗口", self)
+            act_show.setShortcut(QKeySequence("Ctrl+1"))
+            act_show.triggered.connect(self.show_main_window)
+            app_menu.addAction(act_show)
+
+            act_settings = QAction("设置…", self)
+            act_settings.setShortcut(QKeySequence("Ctrl+,"))
+            act_settings.setMenuRole(QAction.PreferencesRole)
+            act_settings.triggered.connect(lambda: self.open_settings())
+            app_menu.addAction(act_settings)
+
+            act_pause = QAction("暂停 / 继续摸鱼", self)
+            act_pause.setShortcut(QKeySequence("Ctrl+P"))
+            act_pause.triggered.connect(self.toggle_pause)
+            app_menu.addAction(act_pause)
+
+            act_widget = QAction("显示桌面小组件", self)
+            act_widget.setCheckable(True)
+            act_widget.setChecked(self.cfg.widget_visible)
+            act_widget.triggered.connect(self.toggle_widget)
+            app_menu.addAction(act_widget)
+            self.act_widget_mac = act_widget
+
+            act_quit = QAction(f"退出 {APP_NAME}", self)
+            act_quit.setShortcut(QKeySequence.Quit)
+            act_quit.setMenuRole(QAction.QuitRole)
+            act_quit.triggered.connect(self.quit_app)
+            app_menu.addAction(act_quit)
+
+            # 菜单栏条目同时挂到主窗口上，菜单动作的快捷键才能在窗口内生效
+            if self.window is not None:
+                self.window.addActions(app_menu.actions())
+        except Exception as exc:
+            self.log.warning("macOS 菜单栏创建失败: %s", exc)
 
     # ------------------------------------------------------------------ #
     # 生命周期 / 单实例
@@ -202,15 +251,7 @@ class MoyuApp(QWidget):
         self.tray = QSystemTrayIcon(self.icon, self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
-        menu.setStyleSheet(f"""
-            QMenu {{ background: #FFFFFF; color: {theme(self.cfg.theme)['text']};
-                     border: 1px solid rgba(120,132,170,0.25); border-radius: 10px;
-                     padding: 6px; font-size: 12px; }}
-            QMenu::item {{ padding: 7px 18px; border-radius: 6px; }}
-            QMenu::item:selected {{ background: {theme(self.cfg.theme)['accent2_soft']};
-                                    color: {theme(self.cfg.theme)['accent2']}; }}
-            QMenu::separator {{ height: 1px; background: rgba(120,132,170,0.18); margin: 4px 8px; }}
-        """)
+        menu.setStyleSheet(self._menu_qss())
         menu.addAction("打开「今天摸了吗」", self.show_main_window)
         self.act_widget = menu.addAction("显示桌面小组件")
         self.act_widget.setCheckable(True)
@@ -227,6 +268,18 @@ class MoyuApp(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
+
+    def _menu_qss(self) -> str:
+        pal = palette_for(self.cfg)
+        return f"""
+            QMenu {{ background: #FFFFFF; color: {pal['text']};
+                     border: 1px solid rgba(120,132,170,0.25); border-radius: 10px;
+                     padding: 6px; font-size: 12px; }}
+            QMenu::item {{ padding: 7px 18px; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {pal['accent2_soft']};
+                                    color: {pal['accent2']}; }}
+            QMenu::separator {{ height: 1px; background: rgba(120,132,170,0.18); margin: 4px 8px; }}
+        """
 
     def _tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -423,10 +476,12 @@ class MoyuApp(QWidget):
             self.widget.raise_()
         elif self.widget:
             self.widget.hide()
-        if hasattr(self, "act_widget"):
-            self.act_widget.blockSignals(True)
-            self.act_widget.setChecked(flag)
-            self.act_widget.blockSignals(False)
+        for name in ("act_widget", "act_widget_mac"):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.blockSignals(True)
+                act.setChecked(flag)
+                act.blockSignals(False)
         self.save_config()
         self._tick()
 
@@ -438,8 +493,8 @@ class MoyuApp(QWidget):
             self.widget.set_on_top(self.cfg.always_on_top)
         self.save_config()
 
-    def open_settings(self) -> None:
-        dlg = SettingsDialog(self)
+    def open_settings(self, tab: int | None = None) -> None:
+        dlg = SettingsDialog(self, tab=tab)
         self.calendar_changed.connect(dlg.update_calendar_status)
         try:
             dlg.exec()
@@ -449,17 +504,20 @@ class MoyuApp(QWidget):
             except (RuntimeError, TypeError):
                 pass
 
+    def open_settings_color(self) -> None:
+        """小组件右键入口：直接打开「外观与系统」页调整配色。"""
+        self.open_settings(tab=2)
+
     def apply_settings(self, new_cfg: Settings) -> None:
         old = self.cfg
         self.cfg = new_cfg
         self.save_config()
         if self.window:
-            self.window.apply_theme(new_cfg.theme)
+            self.window.apply_theme()
             self.window.set_always_on_top(new_cfg.always_on_top)
             self.window.apply_responsive(force=True)
         if self.widget:
             self.widget.cfg = new_cfg
-            self.widget.bg.set_theme(new_cfg.theme)
             self.widget.set_on_top(new_cfg.always_on_top)
             self.widget.set_opacity(new_cfg.widget_opacity)
             self.widget.set_scale(new_cfg.widget_scale)
@@ -467,6 +525,8 @@ class MoyuApp(QWidget):
             if new_cfg.widget_dock_desktop != old.widget_dock_desktop:
                 ok = self.widget.set_docked(new_cfg.widget_dock_desktop)
                 self.cfg.widget_dock_desktop = bool(ok and new_cfg.widget_dock_desktop)
+        if getattr(self, "tray", None) and self.tray.contextMenu():
+            self.tray.contextMenu().setStyleSheet(self._menu_qss())
         self.timer.setInterval(new_cfg.refresh_ms)
 
         # 刷新间隔与自动同步开关修改后立即生效：
@@ -480,7 +540,7 @@ class MoyuApp(QWidget):
             self._last_calendar_attempt = None
             self.sync_calendar_now(force=True)
 
-        if win.IS_WINDOWS and new_cfg.auto_start != old.auto_start:
+        if win.SUPPORTS_AUTOSTART and new_cfg.auto_start != old.auto_start:
             ok, msg = win.set_auto_start(new_cfg.auto_start)
             if not ok:
                 self.notify(APP_NAME, msg)

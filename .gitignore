@@ -43,6 +43,8 @@ credentials*
 build/
 dist/
 *.zip
+*.app
+resources/app.icns
 *.exe
 *.msi
 *.7z

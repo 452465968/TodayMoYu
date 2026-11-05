@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "今天摸了吗"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
 WIDGET_TEXT_FILE = "widget.txt"
@@ -51,6 +51,11 @@ REFRESH_MAX_MS = 3_600_000
 CALENDAR_SYNC_TICKS = 600
 CALENDAR_SYNC_MIN_MS = 15 * 60 * 1000
 CALENDAR_SYNC_MAX_MS = 24 * 60 * 60 * 1000
+
+# 桌面小组件的无级缩放范围（连续取值，不再只有档位）
+WIDGET_SCALE_MIN = 0.5
+WIDGET_SCALE_MAX = 3.0
+WIDGET_OPACITY_MIN = 0.15
 
 # 日期性质 → 中文标签：工作日 / 休息日 / 调休上班日必须一目了然
 DAY_KIND_LABELS: dict[str, str] = {
@@ -87,6 +92,20 @@ def validate_refresh_interval(value: Any, unit: str) -> tuple[bool, str, int]:
         )
     ms = int(min(REFRESH_MAX_MS, max(REFRESH_MIN_MS, round(v * factor))))
     return True, "", ms
+
+
+def effective_hues(cfg: "Settings", widget: bool = False) -> tuple[int, int, int]:
+    """返回当前生效的 (主色相, 副色相, 背景色相)；-1 表示跟随所选主题。
+
+    小组件默认与主界面一致；用户单独指定时各用各的，互不影响。
+    """
+    if widget and not getattr(cfg, "widget_follow_main", True):
+        return (int(getattr(cfg, "widget_accent_hue", -1)),
+                int(getattr(cfg, "widget_accent2_hue", -1)),
+                int(getattr(cfg, "widget_bg_hue", -1)))
+    return (int(getattr(cfg, "accent_hue", -1)),
+            int(getattr(cfg, "accent2_hue", -1)),
+            int(getattr(cfg, "bg_hue", -1)))
 
 
 def calendar_sync_interval_ms(refresh_ms: int) -> int:
@@ -198,6 +217,11 @@ class Settings:
     # 显示
     decimals: int = 4
     theme: str = "aurora"                 # aurora | peach | mint
+    # 自定义配色（色相角 0-359；-1 = 跟随主题默认）
+    # 只改色相、不改明度饱和度，因此文字对比度始终安全
+    accent_hue: int = -1                  # 主色：今日混底薪金额
+    accent2_hue: int = -1                 # 副色：状态 / 时长 / 进度
+    bg_hue: int = -1                      # 背景柔光（渐变底色与光斑）
     fun_enabled: bool = True
     fun_rotate: bool = False
     fun_target_name: str = "一件 T 恤"
@@ -222,6 +246,11 @@ class Settings:
     widget_dock_desktop: bool = False
     widget_opacity: float = 0.94
     widget_scale: float = 1.0
+    # 小组件配色：默认与主界面一致，也可单独指定
+    widget_follow_main: bool = True
+    widget_accent_hue: int = -1
+    widget_accent2_hue: int = -1
+    widget_bg_hue: int = -1
     widget_pos: list[int] | None = None
     main_pos: list[int] | None = None
     main_size: list[int] | None = None           # 主窗口上次拖拽调整后的 [宽, 高]
@@ -248,6 +277,17 @@ class Settings:
         if v != v or v in (float("inf"), float("-inf")):  # NaN / inf
             return default
         return min(hi, max(lo, v))
+
+    @staticmethod
+    def _hue(value: Any, default: int = -1) -> int:
+        """色相角：-1 表示跟随主题，合法范围 0-359。"""
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return default
+        if v < 0 or v > 359:
+            return default
+        return v
 
     @staticmethod
     def _hhmm(value: Any, default: str) -> str:
@@ -333,6 +373,9 @@ class Settings:
 
         s.decimals = int(cls._num(out["decimals"], 4, 0, 6))
         s.theme = out["theme"] if out["theme"] in ("aurora", "peach", "mint") else "aurora"
+        s.accent_hue = cls._hue(out["accent_hue"])
+        s.accent2_hue = cls._hue(out["accent2_hue"])
+        s.bg_hue = cls._hue(out["bg_hue"])
         s.fun_enabled = bool(out["fun_enabled"])
         s.fun_rotate = bool(out["fun_rotate"])
         s.fun_target_name = str(out["fun_target_name"])[:24] or "一件 T 恤"
@@ -367,8 +410,13 @@ class Settings:
         s.auto_start = bool(out["auto_start"])
         s.widget_visible = bool(out["widget_visible"])
         s.widget_dock_desktop = bool(out["widget_dock_desktop"])
-        s.widget_opacity = cls._num(out["widget_opacity"], 0.94, 0.30, 1.0)
-        s.widget_scale = cls._num(out["widget_scale"], 1.0, 0.6, 2.0)
+        s.widget_opacity = cls._num(out["widget_opacity"], 0.94, WIDGET_OPACITY_MIN, 1.0)
+        # 无级缩放：不再只有档位，保留两位小数，范围 0.5x ~ 3.0x
+        s.widget_scale = round(cls._num(out["widget_scale"], 1.0, WIDGET_SCALE_MIN, WIDGET_SCALE_MAX), 3)
+        s.widget_follow_main = bool(out["widget_follow_main"])
+        s.widget_accent_hue = cls._hue(out["widget_accent_hue"])
+        s.widget_accent2_hue = cls._hue(out["widget_accent2_hue"])
+        s.widget_bg_hue = cls._hue(out["widget_bg_hue"])
         for key in ("widget_pos", "main_pos", "main_size", "settings_size"):
             val = out[key]
             s.__setattr__(key, [int(val[0]), int(val[1])] if isinstance(val, list) and len(val) == 2

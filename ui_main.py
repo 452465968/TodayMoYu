@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import APP_NAME, APP_VERSION, Snapshot, day_kind_label, format_hms, format_money
-from theme import SoftGradient, qss, theme
+from theme import SoftGradient, palette_for, qss
 
 if TYPE_CHECKING:
     from main import MoyuApp
@@ -404,7 +404,7 @@ class MainWindow(QWidget):
         try:
             self._scale = s
             px = lambda v: max(1, int(round(v * s)))  # noqa: E731
-            self.setStyleSheet(qss(theme(self.app.cfg.theme), scale=s))
+            self.setStyleSheet(qss(palette_for(self.app.cfg), scale=s))
             self.outer.setContentsMargins(px(11), px(11), px(11), px(11))
             self.L.setContentsMargins(px(20), px(8), px(20), px(12))
             self.handle.setFixedHeight(px(38))
@@ -426,9 +426,12 @@ class MainWindow(QWidget):
             self._applying = False
 
     # ------------------------------------------------------------------ #
-    def apply_theme(self, key: str) -> None:
-        self.bg.set_theme(key)
-        self.setStyleSheet(qss(theme(key), scale=self._scale))
+    def apply_theme(self, key: str | None = None) -> None:
+        """重算主界面调色板：主题切换与自定义色相都走这里，立即重绘。"""
+        pal = palette_for(self.app.cfg)
+        self.bg.set_palette(pal)
+        self.setStyleSheet(qss(pal, scale=self._scale))
+        self.update()
 
     def set_always_on_top(self, flag: bool) -> None:
         base = Qt.FramelessWindowHint | Qt.Window
