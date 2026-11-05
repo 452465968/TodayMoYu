@@ -40,7 +40,7 @@ WHEELS = {
 
 SOURCE_FILES = ["main.py", "core.py", "holiday_calendar.py", "updater.py", "theme.py",
                 "ui_main.py", "ui_settings.py", "ui_widget.py",
-                "win32_extra.py"]
+                "win32_extra.py", "wallpaper_color.py"]
 PTH_CONTENT = "\r\n".join([
     "python311.zip", ".", "Lib\\site-packages", "app",
     "# import site stays disabled on purpose (embeddable distribution)",
