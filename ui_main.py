@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+import win32_extra as win
 from core import APP_NAME, APP_VERSION, Snapshot, day_kind_label, format_hms, format_money
 from theme import SoftGradient, palette_for, qss
 
@@ -230,8 +231,10 @@ class MainWindow(QWidget):
         btn_reset.setObjectName("Ghost")
         btn_reset.setToolTip("清空今日暂停记录，从上班时间重新累计")
         btn_reset.clicked.connect(self.app.reset_today)
-        btn_tray = QPushButton("收进托盘")
+        btn_tray = QPushButton("收进托盘" if win.IS_WINDOWS else "隐藏窗口")
         btn_tray.setObjectName("Ghost")
+        btn_tray.setToolTip("收进系统托盘，点托盘图标可再打开。" if win.IS_WINDOWS
+                            else "隐藏主窗口；点程序坞（Dock）图标或菜单栏图标可再打开。")
         btn_tray.clicked.connect(self.app.minimize_main)
         tools.addWidget(self.btn_widget, 2)
         tools.addWidget(btn_reset, 1)
@@ -459,8 +462,18 @@ class MainWindow(QWidget):
         self.lb_daykind.setText(f"今日：{day_kind_label(snap.day_kind)}　·　{sync}")
 
         self.lb_money.setText(format_money(snap.earned_today, cfg.decimals))
-        self.lb_speed.setText(f"当前摸鱼进账 ¥{snap.per_second:.4f} / 秒"
-                              f"　·　今日满勤 ¥{snap.full_pay:,.2f}")
+        if snap.status == "lunch":
+            self.lb_speed.setText(f"午休中 · 计费已暂停，{cfg.lunch_end} 恢复"
+                                  f"　·　今日满勤 ¥{snap.full_pay:,.2f}")
+        elif snap.status == "before":
+            self.lb_speed.setText(f"还没上班 · 上班后开始累计"
+                                  f"　·　今日满勤 ¥{snap.full_pay:,.2f}")
+        elif snap.status == "rest":
+            self.lb_speed.setText(f"休息日 · 不计薪（调休除外）"
+                                  f"　·　今日满勤 ¥{snap.full_pay:,.2f}")
+        else:
+            self.lb_speed.setText(f"当前摸鱼进账 ¥{snap.per_second:.4f} / 秒"
+                                  f"　·　今日满勤 ¥{snap.full_pay:,.2f}")
 
         self.lb_duration.setText(format_hms(snap.fished_seconds))
         self.lb_hours.setText(

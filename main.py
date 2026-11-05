@@ -22,7 +22,7 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 import holiday_calendar as hc
+import updater
 import win32_extra as win
 from core import (
     APP_NAME, APP_VERSION, AppState, Settings, app_data_dir, compute,
@@ -41,6 +42,25 @@ from ui_settings import SettingsDialog
 from ui_widget import DesktopWidget
 
 SERVER_NAME = "JinTianMoLeMa_SingleInstance_v1"
+
+
+class MoyuQApplication(QApplication):
+    """macOS 专属行为：主窗口被隐藏后，点 Dock 图标 / Cmd+Tab 切回时自动恢复。
+
+    Windows 上不做任何额外处理（托盘是主要入口）。
+    """
+
+    def event(self, e) -> bool:  # noqa: N802
+        if (win.IS_MACOS and e.type() == QEvent.ApplicationStateChange):
+            active = self.applicationState() == Qt.ApplicationActive
+            controller = getattr(self, "_controller", None)
+            if active and controller is not None:
+                w = controller.window
+                if w is not None and not w.isVisible():
+                    w.show()
+                    w.raise_()
+                    w.activateWindow()
+        return super().event(e)
 
 
 def make_icon(size: int = 96) -> QIcon:
@@ -87,6 +107,8 @@ class MoyuApp(QWidget):
     # 后台线程把结果投递回 Qt 主线程，避免网络请求卡住界面
     calendar_result = Signal(object)
     calendar_changed = Signal(str)
+    update_checked = Signal(object)
+    update_downloaded = Signal(object)
 
     def __init__(self, args: list[str]):
         super().__init__()
@@ -111,6 +133,9 @@ class MoyuApp(QWidget):
         self.calendar_status_text = hc.status_text(
             cached, refresh_ms=self.cfg.refresh_ms)
         self.calendar_result.connect(self._on_calendar_result)
+        self.update_checked.connect(self._on_update_checked)
+        self.update_downloaded.connect(self._on_update_downloaded)
+        self._update_inflight = False
 
         if "--at" in args:
             try:
@@ -146,6 +171,10 @@ class MoyuApp(QWidget):
         # 启动后异步同步一次；后续同步由同一个刷新定时器按周期检查
         if self.cfg.calendar_auto_sync and not self._calendar_disabled:
             QTimer.singleShot(1200, lambda: self.sync_calendar_now(force=True))
+
+        # 自动更新：启动 4 秒后检查一次（每天最多一次，失败静默，不打扰）
+        if "--no-update" not in args and not os.environ.get("MOYU_NO_UPDATE"):
+            QTimer.singleShot(4000, self._maybe_check_updates)
 
         if "--minimized" in args:
             self.window.hide()
@@ -193,6 +222,10 @@ class MoyuApp(QWidget):
             act_widget.triggered.connect(self.toggle_widget)
             app_menu.addAction(act_widget)
             self.act_widget_mac = act_widget
+
+            act_update = QAction("检查更新…", self)
+            act_update.triggered.connect(lambda: self.check_updates(manual=True))
+            app_menu.addAction(act_update)
 
             act_quit = QAction(f"退出 {APP_NAME}", self)
             act_quit.setShortcut(QKeySequence.Quit)
@@ -262,6 +295,7 @@ class MoyuApp(QWidget):
         menu.addSeparator()
         menu.addAction("设置", self.open_settings)
         menu.addAction("同步节假日日历", lambda: self.sync_calendar_now(force=True))
+        menu.addAction("检查更新…", lambda: self.check_updates(manual=True))
         menu.addAction("重置今日", self.reset_today)
         menu.addSeparator()
         menu.addAction("退出", self.quit_app)
@@ -298,14 +332,21 @@ class MoyuApp(QWidget):
                 pass
 
     def minimize_main(self) -> None:
-        if self.window:
+        if not self.window:
+            return
+        if win.IS_WINDOWS:
             self.window.showMinimized()
+        else:
+            # macOS：最小化到 Dock 不符合「收起来」的直觉；直接隐藏，
+            # 由 Dock / 菜单栏图标点击恢复（见 MoyuQApplication.event）。
+            self.window.hide()
 
     def close_main(self) -> None:
         if self.cfg.minimize_to_tray:
             if self.window:
                 self.window.hide()
-            self.notify(APP_NAME, "已收进系统托盘，点托盘图标可以再打开。")
+            where = "系统托盘" if win.IS_WINDOWS else "菜单栏 / 程序坞（Dock）"
+            self.notify(APP_NAME, f"已收进{where}，点图标可以再打开。")
         else:
             self.quit_app()
 
@@ -318,17 +359,31 @@ class MoyuApp(QWidget):
             self.close_main()
 
     def quit_app(self) -> None:
+        """退出：先落盘 + 拆界面，再**异步**结束事件循环。
+
+        macOS 上在 closeEvent / 槽函数里同步调用 QApplication.quit() 会走
+        NSApplication terminate: -> exit()，此时 PySide6 的 BindingManager
+        在 C++ 静态析构里销毁 QWidget 包装对象，会踩到已失效的信号追踪器，
+        直接 SIGSEGV（v1.2.0 实测：关闭窗口 / 菜单退出必崩）。
+        因此这里只做清理，真正的 quit 交给下一轮事件循环。
+        """
+        if getattr(self, "_really_quit", False):
+            return
         self._really_quit = True
         try:
             self.cfg.save()
             self.state.save()
+            if self.timer.isActive():
+                self.timer.stop()
             if self.widget:
                 self.widget.hide()
             if getattr(self, "tray", None):
                 self.tray.hide()
+            if self.window:
+                self.window.hide()
         except Exception as exc:
             self.log.warning("退出清理失败: %s", exc)
-        QApplication.quit()
+        QTimer.singleShot(0, QApplication.quit)
 
     # ------------------------------------------------------------------ #
     # 实时刷新
@@ -392,24 +447,44 @@ class MoyuApp(QWidget):
                 self.notify(APP_NAME, "日历正在同步中，请稍候。")
             return
         self._calendar_inflight = True
-        # 用真实墙上时钟计时，避免 --at 模拟时钟加速导致反复联网
+        self._calendar_seq = getattr(self, "_calendar_seq", 0) + 1
+        seq = self._calendar_seq
+        # 墙上时钟计时（而非 --at 模拟时钟），避免加速时钟导致反复联网
         self._last_calendar_attempt = datetime.now()
         self.calendar_status_text = "正在获取法定节假日与调休安排…"
         self.calendar_changed.emit(self.calendar_status_text)
+
+        # watchdog：网络栈异常挂死（如代理假连）时最多等 45s 就解锁，
+        # 否则 _calendar_inflight 永远为 True，后续同步全部被吞（v1.2.0 实测隐患）。
+        def _unlock() -> None:
+            if self._calendar_inflight and self._calendar_seq == seq:
+                self._calendar_inflight = False
+                self.calendar_offline = True
+                self.calendar_status_text = "同步超时 · 沿用最近一次成功数据"
+                self.calendar_changed.emit(self.calendar_status_text)
+                self.log.warning("日历同步超时（>45s），已解锁并沿用缓存")
+
+        QTimer.singleShot(45_000, _unlock)
+
         years = hc.target_years()
 
         def worker() -> None:
             try:
                 fresh, failed = hc.fetch_years(years, timeout=6.0)
                 self.calendar_result.emit({"ok": fresh.published,
-                                           "data": fresh, "failed": failed})
+                                           "data": fresh, "failed": failed,
+                                           "seq": seq})
             except Exception as exc:
                 self.calendar_result.emit({"ok": False, "data": hc.CalendarData(),
-                                           "failed": list(years), "error": str(exc)})
+                                           "failed": list(years), "error": str(exc),
+                                           "seq": seq})
 
         threading.Thread(target=worker, daemon=True, name="moyu-calendar").start()
 
     def _on_calendar_result(self, res: dict) -> None:
+        # 过期响应（watchdog 已解锁后迟到的结果）直接丢弃，避免状态错乱
+        if res.get("seq") is not None and res["seq"] != getattr(self, "_calendar_seq", 0):
+            return
         self._calendar_inflight = False
         cached = hc.load_cache()
         fresh: hc.CalendarData = res.get("data") or hc.CalendarData()
@@ -438,6 +513,151 @@ class MoyuApp(QWidget):
         self._tick()
 
     # ------------------------------------------------------------------ #
+    # 自动更新（GitHub Releases）
+    # ------------------------------------------------------------------ #
+    def _maybe_check_updates(self) -> None:
+        """启动后自动检查：每天最多一次，失败静默。"""
+        if not self.cfg.auto_check_update:
+            return
+        if not updater.needs_check(self.cfg.last_update_check):
+            return
+        self.check_updates(manual=False)
+
+    def check_updates(self, manual: bool = False) -> None:
+        if getattr(self, "_update_inflight", False):
+            if manual:
+                self.notify(APP_NAME, "正在检查更新，请稍候…")
+            return
+        self._update_inflight = True
+        if manual:
+            self.notify(APP_NAME, "正在检查更新…")
+
+        def worker() -> None:
+            try:
+                info = updater.check_latest(APP_VERSION)
+                self.update_checked.emit({"ok": True, "info": info, "manual": manual})
+            except Exception as exc:            # noqa: BLE001
+                self.update_checked.emit({"ok": False, "error": str(exc),
+                                          "manual": manual})
+
+        threading.Thread(target=worker, daemon=True, name="moyu-update").start()
+
+    def _on_update_checked(self, res: dict) -> None:
+        self._update_inflight = False
+        manual = bool(res.get("manual"))
+        self.cfg.last_update_check = datetime.now().isoformat(timespec="seconds")
+        self.save_config()
+
+        if not res.get("ok"):
+            self.log.warning("检查更新失败：%s", res.get("error"))
+            if manual:
+                QMessageBox.information(
+                    self.window, "检查更新",
+                    f"暂时无法连接更新服务器。\n\n{res.get('error')}\n\n"
+                    f"也可以手动访问：{updater.RELEASES_PAGE}")
+            return
+
+        info = res.get("info")
+        if info is None:
+            if manual:
+                QMessageBox.information(
+                    self.window, "检查更新",
+                    f"已是最新版本（v{APP_VERSION}）。")
+            return
+        if not manual and info.version == self.cfg.skipped_version:
+            return                              # 用户选过「跳过此版本」
+        self.log.info("发现新版本：%s（当前 %s）", info.version, APP_VERSION)
+        self._offer_update(info)
+
+    def _offer_update(self, info) -> None:
+        box = QMessageBox(self.window)
+        box.setWindowTitle("发现新版本")
+        box.setIcon(QMessageBox.Information)
+        notes = (info.notes or "").strip()
+        if len(notes) > 600:
+            notes = notes[:600] + "…"
+        size = f"（{info.asset_mb:.1f} MB）" if info.asset_size else ""
+        head = f"{notes}\n\n" if notes else ""
+        if info.asset_url:
+            tail = f"可直接下载安装包{size}，下载完成后会提示替换步骤。"
+        else:
+            tail = "本次发布没有适用于当前系统的安装包，可打开发布页手动下载。"
+        box.setText(f"发现新版本 v{info.version}，当前 v{APP_VERSION}")
+        box.setInformativeText(head + tail)
+        btn_download = box.addButton("下载更新" if info.asset_url else "打开发布页",
+                                     QMessageBox.AcceptRole)
+        btn_skip = None
+        if not info.asset_url:
+            btn_skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
+        else:
+            btn_skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
+        box.addButton("稍后", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_download:
+            if info.asset_url:
+                self._download_update(info)
+            else:
+                from PySide6.QtGui import QDesktopServices
+                from PySide6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl(info.page_url))
+        elif clicked is btn_skip:
+            self.cfg.skipped_version = info.version
+            self.save_config()
+            self.notify(APP_NAME, f"已跳过 v{info.version}，下个版本会再提醒。")
+
+    def _download_update(self, info) -> None:
+        from PySide6.QtWidgets import QProgressDialog
+
+        dlg = QProgressDialog(f"正在下载 v{info.version}…", "取消", 0, 100, self.window)
+        dlg.setWindowTitle("下载更新")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setValue(0)
+        self._update_cancelled = False
+        dlg.canceled.connect(lambda: setattr(self, "_update_cancelled", True))
+
+        dest = app_data_dir() / "updates"
+
+        def on_progress(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(done * 100 / total)
+                QTimer.singleShot(0, lambda: dlg.setValue(min(99, pct)))
+
+        def worker() -> None:
+            try:
+                path = updater.download(info.asset_url, dest,
+                                        progress=on_progress,
+                                        filename=info.asset_name or None)
+                self.update_downloaded.emit({"ok": True, "path": str(path),
+                                             "version": info.version})
+            except Exception as exc:            # noqa: BLE001
+                self.update_downloaded.emit({"ok": False, "error": str(exc)})
+
+        threading.Thread(target=worker, daemon=True, name="moyu-update-dl").start()
+        self._update_dlg = dlg
+        dlg.exec()
+
+    def _on_update_downloaded(self, res: dict) -> None:
+        dlg = getattr(self, "_update_dlg", None)
+        if dlg is not None:
+            dlg.close()
+            self._update_dlg = None
+        if res.get("ok"):
+            path = Path(res["path"])
+            self.log.info("更新包已下载：%s", path)
+            updater.reveal(path)
+            QMessageBox.information(
+                self.window, "下载完成",
+                f"v{res.get('version')} 已下载到：\n{path}\n\n"
+                f"{updater.install_hint()}")
+        else:
+            self.log.warning("更新包下载失败：%s", res.get("error"))
+            QMessageBox.warning(self.window, "下载失败",
+                                f"没能下载更新包：\n{res.get('error')}")
+
+    # ------------------------------------------------------------------ #
     # 操作
     # ------------------------------------------------------------------ #
     def save_config(self) -> None:
@@ -460,6 +680,15 @@ class MoyuApp(QWidget):
         self._tick()
 
     def reset_today(self) -> None:
+        # 有破坏性（清空今日暂停记录并重算），先确认，防误触
+        if self.window is not None and self.window.isVisible():
+            ret = QMessageBox.question(
+                self.window, APP_NAME,
+                "确定重置今日数据吗？\n今日的暂停记录会被清空，"
+                "摸鱼时长与金额将从上班时间重新累计。",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
+            if ret != QMessageBox.Ok:
+                return
         self.state.reset_today(self.now())
         self.state.save()
         self.notify(APP_NAME, "今日数据已重置，重新从上班时间开始摸鱼。")
@@ -468,6 +697,7 @@ class MoyuApp(QWidget):
     def toggle_widget(self, flag: bool) -> None:
         flag = bool(flag)
         self.cfg.widget_visible = flag
+        self.save_config()
         if flag:
             if self.widget is None:
                 self.widget = DesktopWidget(self)
@@ -556,7 +786,7 @@ def main() -> int:
     args = sys.argv[1:]
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(sys.argv)
+    app = MoyuQApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)   # 关窗后仍驻留托盘
@@ -579,6 +809,7 @@ def main() -> int:
     sys.excepthook = _hook
 
     controller = MoyuApp(args)
+    app._controller = controller          # 供 macOS Dock 点击恢复窗口
     return app.exec()
 
 

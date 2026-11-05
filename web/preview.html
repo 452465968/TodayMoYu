@@ -358,7 +358,7 @@ table.diff td.diff { color:#C0392B; font-weight:700; }
       <div class="stat"><span>本月累计</span><b class="mono" id="month">¥0.0000</b></div>
       <div class="hint">已过的日子按满勤补算。本月只计已赚，不含亏损。</div>
       <div class="stat2"><span id="rate">时薪 ¥17.24 · 日薪 ¥129.30</span><span id="full">今日满勤可得 ¥129.30</span></div>
-      <div class="foot">今天摸了吗 · 摸鱼是带薪的　v1.1.0</div>
+      <div class="foot">今天摸了吗 · 摸鱼是带薪的　v1.3.0</div>
     </div>
   </div>
 
@@ -516,6 +516,7 @@ function defaultCfg(){
     fun_target_name:"一件 T 恤", fun_target_amount:50.0,
     refresh_ms:100, refresh_value:100.0, refresh_unit:"ms",
     calendar_auto_sync:true, calendar_holidays:[], calendar_makeup_workdays:[],
+    auto_check_update:true, last_update_check:"", skipped_version:"",
     calendar_updated_at:"", calendar_source:"", calendar_years:[],
     always_on_top:false, minimize_to_tray:true, auto_start:false,
     widget_visible:true, widget_dock_desktop:false, widget_opacity:0.94,
@@ -985,7 +986,7 @@ const CFG_KEYS = ["salary_mode","daily_salary","monthly_salary","pay_days_per_mo
   "refresh_value","refresh_unit","widget_opacity","widget_scale",
   "accent_hue","accent2_hue","bg_hue",
   "widget_accent_hue","widget_accent2_hue","widget_bg_hue"];
-const BOOL_KEYS = ["lunch_enabled","fun_enabled","calendar_auto_sync","widget_follow_main"];
+const BOOL_KEYS = ["lunch_enabled","fun_enabled","calendar_auto_sync","widget_follow_main","auto_check_update"];
 function openDrawer(){
   for (const k of CFG_KEYS) if ($(k)) $(k).value = cfg[k];
   for (const k of BOOL_KEYS) if ($(k)) $(k).checked = !!cfg[k];

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 import win32_extra as win
 from core import (
-    APP_NAME, DAY_NAMES, REFRESH_UNITS, WIDGET_SCALE_MAX, WIDGET_SCALE_MIN,
+    APP_NAME, APP_VERSION, DAY_NAMES, REFRESH_UNITS, WIDGET_SCALE_MAX, WIDGET_SCALE_MIN,
     Settings, app_data_dir,
     calendar_sync_interval_ms, day_kind_label, full_work_seconds, hourly_rate,
     validate_refresh_interval,
@@ -317,6 +317,10 @@ class SettingsDialog(QDialog):
             row.set_hue(-1)
         self.cb_widget_follow.setChecked(True)
         self.preview.setText("已恢复主题默认配色，保存后生效。")
+
+    def _check_updates_now(self) -> None:
+        """设置页里的「检查更新」：直接走主程序的检查流程（含弹窗）。"""
+        self.app.check_updates(manual=True)
 
     def _on_widget_follow_toggled(self, checked: bool) -> None:
         for row in (getattr(self, "hue_w_accent", None),
@@ -670,6 +674,20 @@ class SettingsDialog(QDialog):
             self.cb_dock.setToolTip("「贴到桌面」依赖 Windows 的 WorkerW 图层；macOS 请用「主窗口置顶」。")
         for cb in (self.cb_top, self.cb_tray, self.cb_autostart, self.cb_widget, self.cb_dock):
             v2.addWidget(cb)
+
+        # ---------------- 自动更新 ---------------- #
+        self.cb_auto_update = QCheckBox("启动时自动检查更新（来自 GitHub Releases）")
+        self.cb_auto_update.setChecked(c.auto_check_update)
+        v2.addWidget(self.cb_auto_update)
+        row_up = QHBoxLayout()
+        self.lb_version = QLabel(f"当前版本 v{APP_VERSION}")
+        self.lb_version.setObjectName("Help")
+        self.btn_check_update = QPushButton("检查更新…")
+        self.btn_check_update.clicked.connect(self._check_updates_now)
+        row_up.addWidget(self.lb_version)
+        row_up.addStretch(1)
+        row_up.addWidget(self.btn_check_update)
+        v2.addLayout(row_up)
         L.addWidget(g2)
 
         g3 = QGroupBox("桌面小组件外观（拖动即时预览）")
@@ -783,6 +801,7 @@ class SettingsDialog(QDialog):
         c.always_on_top = self.cb_top.isChecked()
         c.minimize_to_tray = self.cb_tray.isChecked()
         c.auto_start = self.cb_autostart.isChecked()
+        c.auto_check_update = self.cb_auto_update.isChecked()
         c.widget_visible = self.cb_widget.isChecked()
         c.widget_dock_desktop = self.cb_dock.isChecked()
         c.widget_scale = self.slider_scale.value() / 100.0

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "今天摸了吗"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
 WIDGET_TEXT_FILE = "widget.txt"
@@ -256,6 +256,11 @@ class Settings:
     main_size: list[int] | None = None           # 主窗口上次拖拽调整后的 [宽, 高]
     settings_size: list[int] | None = None   # 设置窗口上次调整后的 [宽, 高]
 
+    # 自动更新
+    auto_check_update: bool = True            # 启动后每天检查一次 GitHub Releases
+    last_update_check: str = ""               # 上次检查时间（ISO，用于 24h 节流）
+    skipped_version: str = ""                 # 用户选择「跳过此版本」时记录
+
     # ------------------------------------------------------------------ #
     def normalize_refresh(self) -> "Settings":
         """以「数值 + 单位」为真值重新推导 refresh_ms；保存与加载都会调用。"""
@@ -421,6 +426,9 @@ class Settings:
             val = out[key]
             s.__setattr__(key, [int(val[0]), int(val[1])] if isinstance(val, list) and len(val) == 2
                           and isinstance(val[0], int) and isinstance(val[1], int) else None)
+        s.auto_check_update = bool(out["auto_check_update"])
+        s.last_update_check = str(out["last_update_check"])[:40]
+        s.skipped_version = str(out["skipped_version"])[:20]
         # 关键：加载时也重新推导日薪，旧配置文件里的旧日薪不会残留
         return s.sync_salary()
 
@@ -754,18 +762,26 @@ def _fun_text(cfg: Settings, snap_data: dict[str, Any]) -> str:
         idx = int(snap_data["now"].timestamp() // 20) % len(FUN_TARGETS)
         name, amount = FUN_TARGETS[idx]
 
-    need_seconds = amount / (rate / 3600.0) if rate > 0 else 0
-    h = int(need_seconds // 3600)
-    m = int((need_seconds % 3600) // 60)
-    duration = f"{h} 小时 {m} 分" if h else f"{m} 分"
-
     if snap_data["status"] == "rest":
         return f"今天不用上班，{name}算白送的。"
     if snap_data["status"] == "off":
         return f"今天摸完啦，{name}已经到账。"
+
+    # 关键：以「今日已赚」为基准，而不是从零起算——
+    # 否则已经赚够目标了还在说"再过 X 就摸回来了"（v1.2.0 实测 bug）。
+    left = amount - max(0.0, snap_data.get("earned_today", 0.0))
+    if left <= 0:
+        return f"今天{name}已经摸回来了，接下来都是净赚。"
+
+    per_hour = rate / 3600.0
+    need_seconds = left / per_hour if per_hour > 0 else 0
+    h = int(need_seconds // 3600)
+    m = int((need_seconds % 3600) // 60)
+    duration = f"{h} 小时 {m} 分" if h else f"{m} 分"
+
     if need_seconds > snap_data["remain_seconds"] + 1:
         return f"今天剩下的时间摸不回{name}了，明天接着摸。"
-    return f"再过 {duration}，{name}就摸回来了。"
+    return f"再摸 {duration}，{name}就到账了。"
 
 
 def compute(cfg: Settings, state: AppState, now: datetime | None = None) -> Snapshot:
@@ -834,14 +850,17 @@ def compute(cfg: Settings, state: AppState, now: datetime | None = None) -> Snap
     elif status == "off":
         countdown_text = "已下班 · 快乐是自己的"
     elif status == "lunch":
-        countdown_text = f"午休中 · 距离下班还有 {format_chinese_duration(wall_remain)}"
+        # 明确告知「数据冻结是午休计费暂停」，避免被当成卡死（v1.2.0 用户反馈）
+        countdown_text = (f"午休中 · 计费已暂停，{cfg.lunch_end} 自动恢复"
+                          f" · 距下班 {format_chinese_duration(wall_remain)}")
     else:
         countdown_text = f"距离下班还有 {format_chinese_duration(wall_remain)}"
 
     # 日期行显示真实墙上时钟；金额归属日 d 可能因跨零点班次是前一天
     date_text = f"{now.date().isoformat()} {DAY_NAMES[now.weekday()]} {now.strftime('%H:%M:%S')}"
 
-    base = dict(now=now, status=status, rate=rate, remain_seconds=remain)
+    base = dict(now=now, status=status, rate=rate, remain_seconds=remain,
+                earned_today=earned)
     fun_text = _fun_text(cfg, base)
 
     return Snapshot(

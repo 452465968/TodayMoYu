@@ -38,7 +38,7 @@ WHEELS = {
         "https://pypi.tuna.tsinghua.edu.cn/packages/aa/29/e77f3fba5337f2d98f977eece0fd24cda6cf7d83be2699514d2ca1d34f6c/shiboken6-6.8.3-cp39-abi3-win_amd64.whl",
 }
 
-SOURCE_FILES = ["main.py", "core.py", "holiday_calendar.py", "theme.py",
+SOURCE_FILES = ["main.py", "core.py", "holiday_calendar.py", "updater.py", "theme.py",
                 "ui_main.py", "ui_settings.py", "ui_widget.py",
                 "win32_extra.py"]
 PTH_CONTENT = "\r\n".join([
